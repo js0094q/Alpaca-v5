@@ -57,7 +57,7 @@ async function replay(evidence) {
   positions.onFill(fill);
   evidence?.emit('entry_fill_link', { tradeId: fill.tradeId, signalId: 'signal-fixture', tradeSetId: 'entry-set-1', entrySetId: 'entry-set-1', actionSource: 'V5_AUTO', clientOrderId: 'entry-set-1', orderId: 'buy-order-1', entryPrice: 1, executionId: fill.executionId, symbol, brokerTimestamp: entryTimestamp });
   quote(1, 10_000);
-  quote(1.05, 1);
+  quote(1.10, 1); // Arms the trail; floor 1.06.
   quote(1.04, 1); // Intent and accepted SELL request; no exit evidence yet.
   await sleep(0);
   assert.equal(orders.length, 1);
