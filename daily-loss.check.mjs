@@ -54,17 +54,17 @@ async function sendBreakout(r, label = 'daily-loss') {
   await flush(); await flush();
 }
 
-// Completed losing sets add their realized gross once. The exact -2.5% boundary
+// Completed losing sets add their realized gross once. The exact -10% boundary
 // trips, including when an earlier completed set is replayed after restart.
 wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
 const exactContinuity = createContinuity({ path: stateFile() });
-const exactBaseline = { date, dayStartEquity: 10_000, cumulativeRealizedGross: -150, tripped: false, completedBuyIds: ['buy-1'] };
+const exactBaseline = { date, dayStartEquity: 2_500, cumulativeRealizedGross: -150, tripped: false, completedBuyIds: ['buy-1'] };
 const exactBroker = brokerWith();
 const exact = await initialize(exactContinuity, exactBroker, [closedSet('buy-1', { lossDollars: -150 }), closedSet('buy-2', { lossDollars: -100 })], exactBaseline);
 try {
   const daily = exact.getState().dailyLoss;
   assert.equal(daily.cumulativeRealizedGross, -250, 'cumulative completed gross is in account dollars');
-  assert.equal(daily.tripped, true, 'the exact 2.5% loss boundary trips');
+  assert.equal(daily.tripped, true, 'the exact 10% loss boundary trips');
   assert.deepEqual(daily.completedBuyIds, ['buy-1', 'buy-2'], 'replayed completion is deduplicated');
   assert.ok(exact.getState().lossPauseUntil > wall, 'the existing 60-second losing-set pause remains active');
   const buyCount = exactBroker.calls.filter((order) => order.side === 'buy').length;
@@ -81,7 +81,7 @@ try {
 // gross do not become losses. A same-day process restart retains the P&L state.
 wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
 const aboveContinuity = createContinuity({ path: stateFile() });
-const aboveState = { date, dayStartEquity: 10_000, cumulativeRealizedGross: -249.99, tripped: false, completedBuyIds: ['prior'] };
+const aboveState = { date, dayStartEquity: 2_500, cumulativeRealizedGross: -249.99, tripped: false, completedBuyIds: ['prior'] };
 const aboveBroker = brokerWith();
 const above = await initialize(aboveContinuity, aboveBroker, [closedSet('zero-result', { lossDollars: 0 }), closedSet('profit-result', { lossDollars: 5 })], aboveState);
 try {
@@ -142,18 +142,18 @@ try {
   assert.deepEqual(nextDay.getState().dailyLoss, { date: '2026-09-24', dayStartEquity: 8_000, cumulativeRealizedGross: 0, tripped: false, completedBuyIds: [] });
 } finally { nextDay.stop(); }
 
-// Fractional baseline equity is rounded at the currency boundary: $2.51 is
-// exactly 2.5% of $100.40 and must trip rather than miss from binary rounding.
+// Fractional baseline equity is rounded at the currency boundary: $10.04 is
+// exactly 10% of $100.40 and must trip rather than miss from binary rounding.
 wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
 const fractionalContinuity = createContinuity({ path: stateFile() });
 const fractionalBroker = brokerWith({ equity: 100.40 });
-fractionalContinuity.save([], { pause: null, sets: [closedSet('fractional-loss', { lossDollars: -2.51 })] });
+fractionalContinuity.save([], { pause: null, sets: [closedSet('fractional-loss', { lossDollars: -10.04 })] });
 const fractional = runtime({ continuity: fractionalContinuity, broker: fractionalBroker });
 try {
   await fractional.startup();
   assert.equal(fractional.getState().dailyLoss.dayStartEquity, 100.40);
-  assert.equal(fractional.getState().dailyLoss.cumulativeRealizedGross, -2.51);
-  assert.equal(fractional.getState().dailyLoss.tripped, true, '$2.51 loss trips at 2.5% of $100.40');
+  assert.equal(fractional.getState().dailyLoss.cumulativeRealizedGross, -10.04);
+  assert.equal(fractional.getState().dailyLoss.tripped, true, '$10.04 loss trips at 10% of $100.40');
 } finally { fractional.stop(); }
 
 // PAPER wiring is explicit: production enables the daily-loss guard only for

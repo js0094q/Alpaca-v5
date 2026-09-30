@@ -7,7 +7,7 @@ import { createSipProcessor } from './sip.mjs';
 
 export const FIVE_SECONDS = 5_000;
 const LOSS_PAUSE_MS = 60_000;
-const DAILY_MAX_LOSS_RATE = 0.025;
+const DAILY_MAX_LOSS_RATE = 0.10;
 export const WARMUP_MS = 30_000;
 const OWNERSHIP_CHECK_MS = 5_000;
 const isSpyOption = (symbol) => /^SPY\d{6}[CP]\d{8}$/.test(String(symbol));
@@ -95,8 +95,8 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
         dailyLoss.cumulativeRealizedGross = Math.round((dailyLoss.cumulativeRealizedGross + grossCentQty / 1_000_000) * 100) / 100;
         const equityCents = Math.round(dailyLoss.dayStartEquity * 100);
         const cumulativeGrossCents = Math.round(dailyLoss.cumulativeRealizedGross * 100);
-        const threshold = -(equityCents * 25) / 100_000;
-        const crossed = cumulativeGrossCents <= 0 && -cumulativeGrossCents * 1_000 >= equityCents * 25;
+        const threshold = -(equityCents * 100) / 100_000;
+        const crossed = cumulativeGrossCents <= 0 && -cumulativeGrossCents * 1_000 >= equityCents * 100;
         if (!dailyLoss.tripped && crossed) {
           dailyLoss.tripped = true;
           safeLedger('DAILY_MAX_LOSS', { date: dailyLoss.date, dayStartEquity: dailyLoss.dayStartEquity, cumulativeRealizedGross: dailyLoss.cumulativeRealizedGross, threshold });
@@ -212,7 +212,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
       dailyLoss.dayStartEquity = strategyCapital;
       const capitalCents = Math.round(strategyCapital * 100);
       const grossCents = Math.round(dailyLoss.cumulativeRealizedGross * 100);
-      dailyLoss.tripped ||= grossCents <= 0 && -grossCents * 1_000 >= capitalCents * 25;
+      dailyLoss.tripped ||= grossCents <= 0 && -grossCents * 1_000 >= capitalCents * 100;
     }
     // Establish the date baseline before startup settles any persisted,
     // broker-confirmed completed BUY accounting records below.

@@ -122,7 +122,7 @@ async function breakout(runtime, prefix) {
 }
 
 // The PAPER runtime's one-contract quantity reaches a completed BUY/SELL set;
-// the realized contract loss is recorded once and trips the $12.50 guard.
+// the realized contract loss is recorded once and stays below the $50 guard.
 {
   const continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-cycle-')), 'state.json') });
   const broker = brokerState();
@@ -153,15 +153,15 @@ async function breakout(runtime, prefix) {
     runtime.onOrderUpdate({ event: 'fill', side: 'sell', orderId: sell.id, clientOrderId: sell.clientOrderId,
       executionId: 'cycle-sell-fill', fillQty: 1, fillPrice: 0.80, timestamp: new Date(clock.wall).toISOString() });
     assert.equal(runtime.getState().dailyLoss.cumulativeRealizedGross, -21);
-    assert.equal(runtime.getState().dailyLoss.tripped, true);
+    assert.equal(runtime.getState().dailyLoss.tripped, false);
     assert.deepEqual(runtime.getState().dailyLoss.completedBuyIds, [buy.clientOrderId]);
     assert.ok(runtime.getState().lossPauseUntil > clock.wall, 'completed losing set retains its ordinary loss pause');
   } finally { runtime.stop(); }
 }
 
-// A completed one-contract loss at exactly 2.5% of $500 trips the guard;
+// A completed one-contract loss at exactly 10% of $500 trips the guard;
 // just below remains available and just above is also sticky.
-for (const [label, loss, expected] of [['below', -12.49, false], ['exact', -12.5, true], ['above', -12.51, true]]) {
+for (const [label, loss, expected] of [['below', -49.99, false], ['exact', -50, true], ['above', -50.01, true]]) {
   const continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-loss-')), 'state.json') });
   continuity.save([], { pause: null, sets: [{ tradeSetId: `set-${label}`, date, known: true,
     entryQty: 1, entryCentQty: 100, exitQty: 1, exitCentQty: 100 + loss,
