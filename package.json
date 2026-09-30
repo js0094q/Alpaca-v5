@@ -1,0 +1,8 @@
+{
+  "name": "the-final-trading-bot-v5",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "check": "node runtime.check.mjs", "check:providers": "node providers.check.mjs", "check:closeout": "node closeout.check.mjs", "paper": "node paper.mjs --mode=paper" },
+  "dependencies": { "@msgpack/msgpack": "3.1.3", "ws": "8.21.3" }
+}

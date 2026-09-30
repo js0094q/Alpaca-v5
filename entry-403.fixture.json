@@ -1,0 +1,136 @@
+[
+  {
+    "source": "telemetry-trace/v5-trace-1790343001751-831d2b9c-2866-452a-a5cc-2b5262768b71-000000.jsonl",
+    "lines": [
+      100591,
+      100599,
+      100600
+    ],
+    "events": [
+      {
+        "schema": 1,
+        "runId": "831d2b9c-2866-452a-a5cc-2b5262768b71",
+        "sequence": 96943,
+        "wallTimeMs": 1790343378257,
+        "monoMs": 4533643.709958,
+        "event": "entry_set",
+        "fields": {
+          "signalId": "signal-11",
+          "entrySetId": "v5-buy-c642419c-ee72-4adc-b636-ff8887e36979",
+          "direction": "PUT",
+          "signalTimestamp": "2026-09-25T13:36:18.105901866Z",
+          "spyPrice": 769.45,
+          "symbol": "SPY260925P00769000",
+          "limitPrice": 1.14,
+          "quantity": 3,
+          "cap": 1.1649999999999998,
+          "bid": 1.13,
+          "ask": 1.14,
+          "quoteTimestamp": "2026-09-25T13:36:18.207906499Z"
+        }
+      },
+      {
+        "schema": 1,
+        "runId": "831d2b9c-2866-452a-a5cc-2b5262768b71",
+        "sequence": 96951,
+        "wallTimeMs": 1790343378285,
+        "monoMs": 4533672.376041,
+        "event": "buy_api_error",
+        "fields": {
+          "signalId": "signal-11",
+          "entrySetId": "v5-buy-c642419c-ee72-4adc-b636-ff8887e36979",
+          "orderId": null,
+          "operation": "SUBMIT",
+          "errorName": "Error",
+          "httpStatus": 403
+        }
+      },
+      {
+        "schema": 1,
+        "runId": "831d2b9c-2866-452a-a5cc-2b5262768b71",
+        "sequence": 96952,
+        "wallTimeMs": 1790343378285,
+        "monoMs": 4533672.381708,
+        "event": "entry_state",
+        "fields": {
+          "signalId": "signal-11",
+          "entrySetId": "v5-buy-c642419c-ee72-4adc-b636-ff8887e36979",
+          "orderId": null,
+          "priorState": "SUBMITTING",
+          "state": "SUBMITTING",
+          "orderStatus": "UNKNOWN_OUTCOME",
+          "remainingQty": 3,
+          "action": null,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "source": "telemetry-trace/v5-trace-1790352117757-2fcb3a83-36f0-43d6-9afe-803fa3082437-000007.jsonl",
+    "lines": [
+      65439,
+      65444,
+      65445
+    ],
+    "events": [
+      {
+        "schema": 1,
+        "runId": "2fcb3a83-36f0-43d6-9afe-803fa3082437",
+        "sequence": 1093347,
+        "wallTimeMs": 1790352363305,
+        "monoMs": 3186200.198875,
+        "event": "entry_set",
+        "fields": {
+          "signalId": "signal-62",
+          "entrySetId": "v5-buy-6cb715d5-11c6-4225-bfac-67939e92d1c9",
+          "direction": "PUT",
+          "signalTimestamp": "2026-09-25T16:06:03.043240669Z",
+          "spyPrice": 771.32,
+          "symbol": "SPY260925P00771000",
+          "limitPrice": 1.11,
+          "quantity": 3,
+          "cap": 1.135,
+          "bid": 1.1,
+          "ask": 1.11,
+          "quoteTimestamp": "2026-09-25T16:06:03.146359714Z"
+        }
+      },
+      {
+        "schema": 1,
+        "runId": "2fcb3a83-36f0-43d6-9afe-803fa3082437",
+        "sequence": 1093352,
+        "wallTimeMs": 1790352363331,
+        "monoMs": 3186226.733458,
+        "event": "buy_api_error",
+        "fields": {
+          "signalId": "signal-62",
+          "entrySetId": "v5-buy-6cb715d5-11c6-4225-bfac-67939e92d1c9",
+          "orderId": null,
+          "operation": "SUBMIT",
+          "errorName": "Error",
+          "httpStatus": 403
+        }
+      },
+      {
+        "schema": 1,
+        "runId": "2fcb3a83-36f0-43d6-9afe-803fa3082437",
+        "sequence": 1093353,
+        "wallTimeMs": 1790352363331,
+        "monoMs": 3186226.7415,
+        "event": "entry_state",
+        "fields": {
+          "signalId": "signal-62",
+          "entrySetId": "v5-buy-6cb715d5-11c6-4225-bfac-67939e92d1c9",
+          "orderId": null,
+          "priorState": "SUBMITTING",
+          "state": "SUBMITTING",
+          "orderStatus": "UNKNOWN_OUTCOME",
+          "remainingQty": 3,
+          "action": null,
+          "reason": null
+        }
+      }
+    ]
+  }
+]
