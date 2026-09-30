@@ -135,7 +135,7 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
         } finally { traceLedgerWrites.pending--; }
       },
     });
-    runtime = createRuntime({ broker, telemetry: emit, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, continuity: createContinuity({ path: paths.continuity }), liquidateAt: untilClose ? close - 60_000 : null });
+    runtime = createRuntime({ broker, telemetry: emit, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: mode === 'paper', liquidateAt: untilClose ? close - 60_000 : null });
     await runtime.start();
     ready = true;
     for (const [name, value, receivedAtMs, receivedMonoMs] of pending.splice(0)) {

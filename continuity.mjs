@@ -40,17 +40,23 @@ export function createContinuity({ path = 'state/v5-active-state.json', fs = {} 
   const clear = () => { if (io.existsSync(path)) io.unlinkSync(path); };
   const validPause = (pause) => pause === null || (pause && typeof pause === 'object' &&
     typeof pause.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(pause.date) && validNumber(pause.until));
+  const validDailyLoss = (value) => value === null || (value && typeof value === 'object' &&
+    typeof value.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.date) &&
+    validNumber(value.dayStartEquity) && value.dayStartEquity > 0 &&
+    validNumber(value.cumulativeRealizedGross) && typeof value.tripped === 'boolean' &&
+    Array.isArray(value.completedBuyIds) && value.completedBuyIds.every((id) => typeof id === 'string' && id.length > 0) &&
+    new Set(value.completedBuyIds).size === value.completedBuyIds.length);
   const validSet = (set) => set && typeof set === 'object' && typeof set.tradeSetId === 'string' && set.tradeSetId &&
     typeof set.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(set.date) && typeof set.known === 'boolean' &&
     validNumber(set.entryQty) && set.entryQty >= 0 && validNumber(set.entryCentQty) && set.entryCentQty >= 0 &&
     validNumber(set.exitQty) && set.exitQty >= 0 && validNumber(set.exitCentQty) && set.exitCentQty >= 0 &&
     typeof set.entryTerminal === 'boolean' && (set.closedAt === null || validNumber(set.closedAt));
   const currentMetadata = () => {
-    if (!io.existsSync(path)) return { pause: null, sets: [] };
+    if (!io.existsSync(path)) return { pause: null, sets: [], dailyLoss: null };
     try {
       const parsed = JSON.parse(io.readFileSync(path, 'utf8'));
-      return { pause: validPause(parsed?.pause) ? parsed.pause : null, sets: Array.isArray(parsed?.sets) && parsed.sets.every(validSet) ? parsed.sets : [] };
-    } catch { return { pause: null, sets: [] }; }
+      return { pause: validPause(parsed?.pause) ? parsed.pause : null, sets: Array.isArray(parsed?.sets) && parsed.sets.every(validSet) ? parsed.sets : [], dailyLoss: validDailyLoss(parsed?.dailyLoss) ? parsed.dailyLoss : null };
+    } catch { return { pause: null, sets: [], dailyLoss: null }; }
   };
   const save = (trades, metadata = {}) => {
     const active = trades.filter((trade) => Number(trade?.remainingQty) > 0);
@@ -60,12 +66,13 @@ export function createContinuity({ path = 'state/v5-active-state.json', fs = {} 
     const prior = currentMetadata();
     const pause = metadata.pause === undefined ? prior.pause : metadata.pause;
     const sets = metadata.sets === undefined ? prior.sets : metadata.sets;
-    if (!validPause(pause) || !Array.isArray(sets) || !sets.every(validSet) || new Set(sets.map((set) => set.tradeSetId)).size !== sets.length) throw new TypeError('invalid runtime continuity state');
-    if (!records.length && !pause && !sets.length) return clear();
+    const dailyLoss = metadata.dailyLoss === undefined ? prior.dailyLoss : metadata.dailyLoss;
+    if (!validPause(pause) || !Array.isArray(sets) || !sets.every(validSet) || new Set(sets.map((set) => set.tradeSetId)).size !== sets.length || !validDailyLoss(dailyLoss)) throw new TypeError('invalid runtime continuity state');
+    if (!records.length && !pause && !sets.length && !dailyLoss) return clear();
     const directory = dirname(path);
     io.mkdirSync(directory, { recursive: true });
     const temporary = `${path}.tmp`;
-    io.writeFileSync(temporary, `${JSON.stringify({ version: 1, trades: records, ...(pause ? { pause } : {}), ...(sets.length ? { sets } : {}) })}\n`, { encoding: 'utf8', mode: 0o600 });
+    io.writeFileSync(temporary, `${JSON.stringify({ version: 1, trades: records, ...(pause ? { pause } : {}), ...(sets.length ? { sets } : {}), ...(dailyLoss ? { dailyLoss } : {}) })}\n`, { encoding: 'utf8', mode: 0o600 });
     io.renameSync(temporary, path);
   };
   const load = () => {
@@ -76,9 +83,10 @@ export function createContinuity({ path = 'state/v5-active-state.json', fs = {} 
       const orderIds = parsed?.trades?.filter((trade) => trade.orderId !== null).map((trade) => trade.orderId) ?? [];
       const pause = parsed?.pause === undefined ? null : parsed.pause;
       const sets = parsed?.sets === undefined ? [] : parsed.sets;
-      if (parsed?.version !== 1 || !Array.isArray(parsed.trades) || !parsed.trades.every(validTrade) || new Set(parsed.trades.map((trade) => trade.tradeId)).size !== parsed.trades.length || new Set(logicalIds).size !== logicalIds.length || new Set(orderIds).size !== orderIds.length || !validPause(pause) || !Array.isArray(sets) || !sets.every(validSet) || new Set(sets.map((set) => set.tradeSetId)).size !== sets.length) return { status: 'incompatible', trades: [], pause: null, sets: [] };
-      return { status: 'compatible', trades: parsed.trades.map(pick), pause, sets };
-    } catch { return { status: 'corrupt', trades: [], pause: null, sets: [] }; }
+      const dailyLoss = parsed?.dailyLoss === undefined ? null : parsed.dailyLoss;
+      if (parsed?.version !== 1 || !Array.isArray(parsed.trades) || !parsed.trades.every(validTrade) || new Set(parsed.trades.map((trade) => trade.tradeId)).size !== parsed.trades.length || new Set(logicalIds).size !== logicalIds.length || new Set(orderIds).size !== orderIds.length || !validPause(pause) || !Array.isArray(sets) || !sets.every(validSet) || new Set(sets.map((set) => set.tradeSetId)).size !== sets.length || !validDailyLoss(dailyLoss)) return { status: 'incompatible', trades: [], pause: null, sets: [], dailyLoss: null };
+      return { status: 'compatible', trades: parsed.trades.map(pick), pause, sets, dailyLoss };
+    } catch { return { status: 'corrupt', trades: [], pause: null, sets: [], dailyLoss: null }; }
   };
   return { path, save, load, clear };
 }

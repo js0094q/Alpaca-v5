@@ -86,7 +86,14 @@ c.save([], { pause: pauseState, sets: [setState] });
 assert.deepEqual([c.load().pause, c.load().sets], [pauseState, [setState]]); // same-day runtime data survives while broker flat
 c.save([trade]);
 assert.deepEqual([c.load().pause, c.load().sets], [pauseState, [setState]]); // position callbacks preserve runtime fields
+const dailyLossState = { date: '2026-09-23', dayStartEquity: 10_000, cumulativeRealizedGross: -250, tripped: true, completedBuyIds: ['buy-set-1', 'buy-set-2'] };
+c.save([], { pause: pauseState, sets: [setState], dailyLoss: dailyLossState });
+assert.deepEqual(c.load().dailyLoss, dailyLossState); // baseline, cumulative result, sticky trip, and dedup IDs survive restart
+c.save([trade]);
+assert.deepEqual(c.load().dailyLoss, dailyLossState); // position callbacks preserve daily risk state
 c.save([], { pause: null, sets: [] });
+assert.deepEqual(c.load().dailyLoss, dailyLossState); // unrelated metadata updates preserve daily risk state
+c.save([], { pause: null, sets: [], dailyLoss: null });
 assert.equal(c.load().status, 'missing');
 
 const calls = [];
