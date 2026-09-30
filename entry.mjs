@@ -1,11 +1,13 @@
 import { observe } from './telemetry/trace.mjs';
 import { randomUUID } from 'node:crypto';
 
-const QTY = 3;
 const NO_FILL_MS = 2_000;
 const REMAINING_MS = 5_000;
 
-export function createEntry({ broker, getContracts, getQuote, onFill, onState, nowMono, telemetry, canSubmit = () => true }) {
+export function createEntry({ broker, getContracts, getQuote, onFill, onState, nowMono, telemetry, canSubmit = () => true, quantity = 3, strategyCapital = null }) {
+  if (!Number.isInteger(quantity) || quantity <= 0) throw new TypeError('quantity must be a positive integer');
+  if (strategyCapital !== null && (!Number.isFinite(strategyCapital) || strategyCapital <= 0)) throw new TypeError('strategyCapital must be positive');
+  const QTY = quantity;
   const trace = (event, fields = {}) => observe(telemetry, event, { actionSource: 'V5_AUTO', ...(signalId ? { signalId } : {}), ...(clientOrderId ? { tradeSetId: clientOrderId, entrySetId: clientOrderId, clientOrderId } : {}), ...fields });
   let signalId = null;
   let state = 'IDLE';
@@ -246,6 +248,9 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
       quote = picked.quote;
       spreadCap = picked.spreadCap;
       cap = (quote.bid + quote.ask) / 2 + 0.03;
+      // Reserve the full frozen reprice ceiling, not only the initial ask.
+      // The fixed SPY strategy uses standard 100-share option contracts.
+      if (strategyCapital !== null && cap * QTY * (contract.contractSize ?? 100) > strategyCapital + 1e-9) return abandon('ENTRY_CAPITAL_LIMIT');
     trace('entry_construction', { signalId, direction: event.direction, symbol: contract.symbol, strike: contract.strike, contractSize: contract.contractSize ?? null, contractSizeSource: contract.contractSize ? 'alpaca_contract_metadata' : null, bid: quote.bid, ask: quote.ask, quoteTimestamp: quote.timestamp, spread: quote.ask - quote.bid, spreadCap, midpoint: (quote.bid + quote.ask) / 2, frozenCap: cap });
       await submit();
     },

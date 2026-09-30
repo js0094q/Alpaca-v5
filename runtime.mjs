@@ -18,7 +18,7 @@ const entryCutoffMinutes = (value) => {
   return hour * 60 + minute;
 };
 
-export function createRuntime({ broker, getContracts, getQuote, calendar, now = () => Date.now(), nowMono = () => performance.now(), ledger = () => {}, continuity = createContinuity(), dailyLossGuard = false, liquidateAt = null, telemetry, entryCutoffMinuteET = 15 * 60 + 30, stopAtMs = null }) {
+export function createRuntime({ broker, getContracts, getQuote, calendar, now = () => Date.now(), nowMono = () => performance.now(), ledger = () => {}, continuity = createContinuity(), dailyLossGuard = false, strategyCapital = null, entryQuantity = 3, liquidateAt = null, telemetry, entryCutoffMinuteET = 15 * 60 + 30, stopAtMs = null }) {
   if (!broker || !getContracts || !getQuote || !calendar) throw new TypeError('broker, contract, quote, and calendar inputs are required');
   if (stopAtMs !== null && !Number.isFinite(stopAtMs)) throw new TypeError('stopAtMs must be a finite timestamp');
   if (liquidateAt !== null && !Number.isFinite(liquidateAt)) throw new TypeError('liquidateAt must be a finite timestamp');
@@ -69,7 +69,8 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
   const persistContinuity = () => continuity.save(trades(), { pause: activePause, sets: [...setAccounting.values()], ...(dailyLossGuard && dailyLoss ? { dailyLoss } : {}) });
   const canEnterDailyLoss = () => !dailyLossGuard || Boolean(!dailyLossStateUnavailable && dailyLoss && dailyLoss.date === sessionDate && !dailyLoss.tripped);
   const establishDailyLoss = (date, equity, { persist = true } = {}) => {
-    const dayStartEquity = Number(equity);
+    // Retain the continuity field name; PAPER uses configured strategy capital.
+    const dayStartEquity = Number(strategyCapital ?? equity);
     if (!Number.isFinite(dayStartEquity) || dayStartEquity <= 0) return false;
     dailyLoss = { date, dayStartEquity, cumulativeRealizedGross: 0, tripped: false, completedBuyIds: [] };
     dailyLossStateUnavailable = false;
@@ -122,7 +123,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     const record = current?.clientOrderId ? setAccounting.get(current.clientOrderId) : null;
     if (!record) return;
     const orderStatus = String(current.orderStatus ?? '').toLowerCase();
-    record.entryTerminal = current.state === 'DONE' || current.filled >= 3 || ['canceled', 'cancelled', 'done', 'expired', 'rejected'].includes(orderStatus);
+    record.entryTerminal = current.state === 'DONE' || current.filled >= entryQuantity || ['canceled', 'cancelled', 'done', 'expired', 'rejected'].includes(orderStatus);
     if (record.entryTerminal) {
       persistContinuity();
       finishSetIfReady(record);
@@ -172,7 +173,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     }
   }, onState: (s) => { if (!hydrating) continuity.save(positions.getTrades()); if (s?.state) setState(s.state, s); }, now, nowMono });
   let entry;
-  entry = createEntry({ broker, telemetry, canSubmit: () => { const current = now(), session = calendar.sessionFor(current); return canEnterDailyLoss() && (stopAtMs === null || current < stopAtMs) && session?.status === 'open' && session.date === sessionDate && entryCutoffMinutes(current) < buyCutoffMinuteET && (!session.cutoff || current < Date.parse(session.cutoff)); }, getContracts, getQuote, nowMono, onFill: (fill) => {
+  entry = createEntry({ broker, telemetry, quantity: entryQuantity, strategyCapital, canSubmit: () => { const current = now(), session = calendar.sessionFor(current); return canEnterDailyLoss() && (stopAtMs === null || current < stopAtMs) && session?.status === 'open' && session.date === sessionDate && entryCutoffMinutes(current) < buyCutoffMinuteET && (!session.cutoff || current < Date.parse(session.cutoff)); }, getContracts, getQuote, nowMono, onFill: (fill) => {
     safeLedger('FILL', fill);
     const priceCents = cents(fill.entryPrice);
     if (fill.tradeSetId && priceCents !== null) {
@@ -207,6 +208,12 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     startupEquityDate = currentSession?.date ?? null;
     dailyLossStateUnavailable = dailyLossGuard && ['corrupt', 'incompatible'].includes(saved.status);
     dailyLoss = dailyLossGuard && saved.dailyLoss?.date === currentSession?.date ? { ...saved.dailyLoss, completedBuyIds: [...saved.dailyLoss.completedBuyIds] } : null;
+    if (dailyLoss && strategyCapital !== null) {
+      dailyLoss.dayStartEquity = strategyCapital;
+      const capitalCents = Math.round(strategyCapital * 100);
+      const grossCents = Math.round(dailyLoss.cumulativeRealizedGross * 100);
+      dailyLoss.tripped ||= grossCents <= 0 && -grossCents * 1_000 >= capitalCents * 25;
+    }
     // Establish the date baseline before startup settles any persisted,
     // broker-confirmed completed BUY accounting records below.
     if (dailyLossGuard && !dailyLossStateUnavailable && !dailyLoss && startupEquityDate && startupEquityDate === currentSession?.date) {
