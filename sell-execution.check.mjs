@@ -111,6 +111,7 @@ const intentPositions = createPositions({ broker });
 intentPositions.onFill({ tradeId: 'intent', executionId: 'intent-buy', symbol: 'SPY260925P00768000', entryPrice: 1, timestamp: 1 });
 intentPositions.onQuote({ symbol: 'SPY260925P00768000', bid: 1, timestamp: 10_001 });
 intentPositions.onQuote({ symbol: 'SPY260925P00768000', bid: 1.26, timestamp: 10_002 });
+intentPositions.onQuote({ symbol: 'SPY260925P00768000', bid: 1.21, timestamp: 10_003 }); // trail floor is 1.22; strict retreat latches SELL
 await flush();
 assert.equal(bodies[0].position_intent, 'sell_to_close');
 await broker.replaceOrder('order', { qty: 1, limitPrice: 1.27 });

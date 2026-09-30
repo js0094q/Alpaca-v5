@@ -39,7 +39,10 @@ def rebuild():
         elif m['event'] == 'sell_latch':
             latches.setdefault(t, {'reason': f['reason'], 'bid': round(f['bid'] * 100)})
         elif f.get('bid') is not None and f.get('sourceTimestamp'):
-            quotes[t][iso_ms(f['sourceTimestamp'])] = round(f['bid'] * 100)
+            # Production grace uses quote acceptance/receipt time, not SIP source time.
+            # Retain source time only as a fallback for older trace rows.
+            accepted_ms = f.get('receivedAt')
+            quotes[t][int(accepted_ms) if accepted_ms is not None else iso_ms(f['sourceTimestamp'])] = round(f['bid'] * 100)
     post = collections.defaultdict(dict)
     for line in grep('POST_EXIT_QUOTE', glob.glob(os.path.join(ACCOUNT, 'post-exit-evidence', '*.jsonl'))):
         f = json.loads(line)['fields']
@@ -73,18 +76,17 @@ def rebuild():
 
 
 def simulate(t, grace_s, ref_mode, scheme, loss_pct=10, grace_stop_pct=None):
-    """Return (exit_bid_cents, reason, truncated). Mirrors positions.mjs: the anchor is the bid
-    current at fill+grace; loss floor sells at <=; profit floors sell strictly below."""
+    """Return (exit_bid_cents, reason, truncated). Anchor is the first accepted usable bid
+    at/after grace; that quote can trigger the loss floor but cannot arm/trigger profit protection."""
     entry, grace_end = t['entry'], t['fill'] + grace_s * 1000
-    anchor = ref = floor = peak = loss_floor = last = None
+    anchor = ref = floor = peak = loss_floor = None
     for ts, bid in t['path']:
         if anchor is None:
             if ts < grace_end:
-                last = bid
                 if ts >= t['fill'] and grace_stop_pct and bid <= entry * (1 - grace_stop_pct / 100):
                     return bid, 'grace_stop', False
                 continue
-            anchor = last if last is not None else bid
+            anchor = bid
             ref = max(entry, anchor) if ref_mode == 'max' else anchor
             loss_floor = ref * (100 - loss_pct) / 100
             if anchor <= loss_floor:
@@ -142,13 +144,16 @@ def main():
     cache = os.path.join(CACHE, 'trades.pkl')
     trades = rebuild() if args.rebuild or not os.path.exists(cache) else pickle.load(open(cache, 'rb'))
     dates = sorted({t['date'] for t in trades})
-    base = score(trades, 10, 'anchor', SCHEMES['current: +5/+8 floors, +10 ceiling'])
-    same = sum(simulate(t, 10, 'anchor', SCHEMES['current: +5/+8 floors, +10 ceiling'])[0] == t['latch_bid'] for t in trades)
+    # Revision 2 compares every rule against the same effective reference.
+    # Keep this validation row aligned with the sequenced replay below.
+    base = score(trades, 10, 'max', SCHEMES['current: +5/+8 floors, +10 ceiling'])
+    same = sum(simulate(t, 10, 'max', SCHEMES['current: +5/+8 floors, +10 ceiling'])[0] == t['latch_bid'] for t in trades)
     print(f"{len(trades)} contracts over {', '.join(dates)}")
     print(f"validation: replay of current rule ${base['ALL']['pnl']} vs bot latch bids ${sum(t['latch_bid'] - t['entry'] for t in trades)}"
           f" vs actual fills ${sum(t['exit_fill'] - t['entry'] for t in trades)}; same exit bid on {same}/{len(trades)}\n")
     rows = []
-    for grace, ref, name in itertools.product([0, 5, 10, 20], ['anchor', 'max'], SCHEMES):
+    for grace, name in itertools.product([0, 5, 10, 20], SCHEMES):
+        ref = 'max'
         rows.append((grace, ref, name, score(trades, grace, ref, SCHEMES[name])))
     rows.sort(key=lambda r: -r[3]['ALL']['pnl'])
     print(f"{'grace':>5} {'ref':>6}  {'exit rule':36} {'total$':>7} {'win%':>5} " + ' '.join(f'{d[5:]:>7}' for d in dates) + f" {'trunc':>5}")

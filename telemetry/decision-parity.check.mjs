@@ -48,9 +48,9 @@ async function scenario(mode) {
   quote(1, 11_000);
   quote(1.05, 11_100);
   quote(1.08, 11_200);
-  quote(1.07, 11_300);
+  quote(1.03, 11_300); // strict retreat below the peak-derived 1.04 floor
   await new Promise((resolve) => setImmediate(resolve));
-  positions.onOrderUpdate({ orderId: 'sell-order', clientOrderId: 'v5-sell-test', event: 'fill', executionId: 'sell-exec', fillQty: 1, fillPrice: 1.07, timestamp: new Date(now).toISOString() });
+  positions.onOrderUpdate({ orderId: 'sell-order', clientOrderId: 'v5-sell-test', event: 'fill', executionId: 'sell-exec', fillQty: 1, fillPrice: 1.03, timestamp: new Date(now).toISOString() });
 
   return {
     behavior: {
@@ -72,11 +72,10 @@ assert.deepEqual(enabled.behavior, disabled.behavior);
 assert.deepEqual(faulting.behavior, disabled.behavior);
 for (const { event, fields } of enabled.events) assert(Object.keys(fields).length <= 32, `${event} exceeds bounded trace field limit`);
 assert(enabled.events.some(({ event, fields }) => event === 'lot_decision' && fields.action === 'ANCHOR_SET' && fields.graceEndsAt === 11_000));
-assert(enabled.events.some(({ event, fields }) => event === 'lot_decision' && fields.action === 'ARM_5C'));
-assert(enabled.events.some(({ event, fields }) => event === 'lot_decision' && fields.action === 'REARM_8C'));
+assert(enabled.events.some(({ event, fields }) => event === 'lot_decision' && fields.action === 'TRAIL_ARM'));
 assert(enabled.events.some(({ event, fields }) => event === 'sell_latch' && fields.reason === 'profit_floor' && fields.tradeSetId === 'buy-set'));
 assert.equal(enabled.events.find(({ event }) => event === 'entry_set')?.fields.maxBuyQty, 3);
 assert.equal(enabled.events.find(({ event }) => event === 'position_exit')?.fields.tradeId, 'entry-exec:1');
 assert.deepEqual(enabled.behavior.entryLinks, [{ contractSize: 100, contractSizeSource: 'alpaca_contract_metadata', hasSignalId: true, hasTradeSetId: true, actionSource: 'V5_AUTO' }]);
-assert.deepEqual([enabled.behavior.exits[0].premiumPnlPerShare, enabled.behavior.exits[0].contractSize, enabled.behavior.exits[0].realizedPnlUsd], [0.07, 100, 7]);
+assert.deepEqual([enabled.behavior.exits[0].premiumPnlPerShare, enabled.behavior.exits[0].contractSize, enabled.behavior.exits[0].realizedPnlUsd], [0.03, 100, 3]);
 console.log('telemetry/decision-parity.check.mjs: decisions match with telemetry disabled, enabled, and faulting');

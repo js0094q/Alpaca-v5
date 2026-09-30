@@ -118,16 +118,15 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     const anchor = cents(trade.anchorBid);
     return entry === null || anchor === null ? null : Math.max(entry, anchor);
   };
-  const phase = (trade) => trade.remainingQty <= 0 ? 'CLOSED' : trade.sellLatched ? 'SELL_LATCHED' : trade.profitFloor === null ? 'HOLD' : cents(trade.profitFloor) >= (referenceCents(trade) ?? cents(trade.entryPrice)) + 8 ? 'PROTECTED_8C' : 'PROTECTED_5C';
+  const phase = (trade) => trade.remainingQty <= 0 ? 'CLOSED' : trade.sellLatched ? 'SELL_LATCHED' : trade.profitFloor === null ? 'HOLD' : 'TRAILING';
   const latch = (trade, reason) => {
     const priorPhase = phase(trade);
     trade.sellLatched = true;
     trade.logicalSellId ||= `v5-sell-${randomUUID()}`;
     const reference = referenceCents(trade);
     const threshold = reason === 'loss_trigger' ? (reference === null ? null : reference / 100 * 0.9)
-      : reason === 'ceiling_10c' ? (reference === null ? null : (reference + 10) / 100)
-        : reason === 'profit_floor' ? trade.profitFloor : null;
-    const comparison = reason === 'loss_trigger' ? 'bid<=threshold' : reason === 'ceiling_10c' ? 'bid>=threshold' : reason === 'profit_floor' ? 'bid<floor' : null;
+      : reason === 'profit_floor' ? trade.profitFloor : null;
+    const comparison = reason === 'loss_trigger' ? 'bid<=threshold' : reason === 'profit_floor' ? 'bid<floor' : null;
     trace('sell_latch', { tradeId: trade.tradeId, tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId, clientOrderId: trade.logicalSellId, symbol: trade.symbol, reason, threshold, comparison, entryPrice: trade.entryPrice, anchorBid: trade.anchorBid, activeDownsideFloor: trade.profitFloor, priorPhase, phase: phase(trade), logicalSellId: trade.logicalSellId, remainingQty: trade.remainingQty, bid: trade.quote?.bid, sourceTimestamp: trade.quote?.timestamp, quoteTimestamp: trade.quote?.timestamp, receivedAt: trade.quoteReceivedAtMs, receivedMonoMs: trade.quoteReceivedMonoMs });
     notify(trade);
     pump(trade);
@@ -145,7 +144,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     const priorPhase = phase(trade);
     const decision = (action) => {
       const reference = referenceCents(trade);
-      return trace('lot_decision', { tradeId: trade.tradeId, tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId, symbol: trade.symbol, priorPhase, phase: phase(trade), action, evaluatedAt, receivedAt: evaluatedAt, receivedMonoMs: trade.quoteReceivedMonoMs, ageMs: evaluatedAt === null || !Number.isFinite(trade.fillTimestampMs) ? null : evaluatedAt - trade.fillTimestampMs, graceActive, graceEndsAt, anchorSetAtMs: trade.anchorSetAtMs ?? null, anchorSourceTimestamp: trade.anchorSourceTimestamp ?? null, bid: quote.bid, sourceTimestamp: quote.timestamp, quoteTimestamp: quote.timestamp, entryPrice: trade.entryPrice, anchorBid: trade.anchorBid, lossThreshold: reference === null ? null : reference / 100 * 0.9, lossComparison: 'bid<=lossThreshold', activeDownsideFloor: trade.profitFloor, floorComparison: 'bid<activeDownsideFloor', arm5cThreshold: reference === null ? null : (reference + 5) / 100, rearm8cThreshold: reference === null ? null : (reference + 8) / 100, ceiling10cThreshold: reference === null ? null : (reference + 10) / 100, remainingQty: trade.remainingQty });
+      return trace('lot_decision', { tradeId: trade.tradeId, tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId, symbol: trade.symbol, priorPhase, phase: phase(trade), action, evaluatedAt, receivedAt: evaluatedAt, receivedMonoMs: trade.quoteReceivedMonoMs, ageMs: evaluatedAt === null || !Number.isFinite(trade.fillTimestampMs) ? null : evaluatedAt - trade.fillTimestampMs, graceActive, graceEndsAt, anchorSetAtMs: trade.anchorSetAtMs ?? null, anchorSourceTimestamp: trade.anchorSourceTimestamp ?? null, bid: quote.bid, sourceTimestamp: quote.timestamp, quoteTimestamp: quote.timestamp, entryPrice: trade.entryPrice, anchorBid: trade.anchorBid, lossThreshold: reference === null ? null : reference / 100 * 0.9, lossComparison: 'bid<=lossThreshold', activeDownsideFloor: trade.profitFloor, floorComparison: 'bid<activeDownsideFloor', trailArmThreshold: reference === null ? null : (reference + 2) / 100, remainingQty: trade.remainingQty });
     };
     let anchorQuote = false;
     if (trade.anchorBid === null) {
@@ -168,30 +167,18 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       return;
     }
     if (anchorQuote) { decision('ANCHOR_SET'); return; }
-    if (bid >= reference + 10) {
-      latch(trade, 'ceiling_10c');
-      decision('CEILING_10C');
-      return;
-    }
-
     const floor = cents(trade.profitFloor);
-    if (floor === null && bid >= reference + 5) {
-      trade.profitFloor = (reference + 5) / 100;
-      decision('ARM_5C');
-      trace('protection_arm_5c', { tradeId: trade.tradeId, profitFloor: trade.profitFloor, bid: quote.bid, quoteTimestamp: quote.timestamp });
-      trade.lastProtectionQuote = quote;
+    if (floor === null && bid >= reference + 2) {
+      trade.profitFloor = (bid - 4) / 100;
+      decision('TRAIL_ARM');
       notify(trade);
       return;
     }
-    if (floor !== null && floor < reference + 8 && bid >= reference + 8) {
-      trade.profitFloor = (reference + 8) / 100;
-      decision('REARM_8C');
-      trace('protection_rearm_8c', { tradeId: trade.tradeId, profitFloor: trade.profitFloor, bid: quote.bid, quoteTimestamp: quote.timestamp });
-      trade.lastProtectionQuote = quote;
+    if (floor !== null && bid - 4 > floor) {
+      trade.profitFloor = (bid - 4) / 100;
       notify(trade);
-      return;
     }
-    if (floor !== null && bid < floor && trade.lastProtectionQuote !== quote) {
+    if (floor !== null && bid < cents(trade.profitFloor)) {
       latch(trade, 'profit_floor');
       decision('PROFIT_FLOOR_LATCH');
     } else decision('HOLD');

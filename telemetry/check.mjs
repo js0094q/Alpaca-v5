@@ -32,8 +32,8 @@ async function lifecycle(positionsFactory, entryFactory, telemetry, signalFactor
   let scenarioIndex = 0;
   for (const [name, quotes] of [
     ['loss', [[1000, 1.01], [9999, 0.89], [10000, 0.89], [10100, 0.89], [10200, 0.89]]],
-    ['floor', [[10000, 1.00], [10100, 1.00], [10200, 1.05], [10300, 1.08], [10400, 1.07]]],
-    ['ceiling', [[10000, 1.10], [10100, 1.10], [10200, 1.20]]],
+    ['trail', [[10000, 1.00], [10100, 1.00], [10200, 1.05], [10300, 1.08], [10400, 1.07], [10500, 1.03]]],
+    ['runup-retreat', [[10000, 1.10], [10100, 1.10], [10200, 1.20], [10300, 1.15]]],
   ]) {
     const base = Date.parse('2026-09-24T14:00:00Z') + scenarioIndex++ * 180000;
     let wall = base, sequence = 0;
@@ -113,7 +113,7 @@ try {
   checks.push('Trace and standalone writer both default to 256x64MiB (16GiB) retention');
   const primitive = rows.find((row) => row.event === 'primitive_limits');
   assert.equal(primitive.fields.long.length, 256); assert.equal(primitive.fields.object, undefined); assert.equal(Object.keys(primitive.fields).length, 32);
-  for (const action of ['HOLD', 'LOSS_SUPPRESSED_BY_GRACE', 'LOSS_LATCH', 'ARM_5C', 'REARM_8C', 'PROFIT_FLOOR_LATCH', 'CEILING_10C']) assert(rows.some((row) => row.event === 'lot_decision' && row.fields.action === action), action);
+  for (const action of ['HOLD', 'LOSS_SUPPRESSED_BY_GRACE', 'LOSS_LATCH', 'TRAIL_ARM', 'PROFIT_FLOOR_LATCH']) assert(rows.some((row) => row.event === 'lot_decision' && row.fields.action === action), action);
   assert.equal(rows.filter((row) => row.event === 'position_exit').length, 9);
   assert(rows.some((row) => row.event === 'entry_state' && row.fields.orderStatus === 'partial_fill'));
   assert.equal(rows.filter((row) => row.event === 'buy_reprice').length, 3);
@@ -136,7 +136,7 @@ try {
     assert.equal(exits.reduce((sum, row) => sum + row.fields.quantity, 0), 1);
     assert.equal(exits.at(-1).fields.remainingQty, 0);
   }
-  checks.push('Signal-driven baseline vs disabled/enabled/throwing-observer order/state parity; 30-second range joined through selection/entry set; BUY partial1 then2 with repricing and grace/suppression/loss, 5c/8c/floor/10c; 9 whole-contract lots and9 SELLfills reconstructed');
+  checks.push('Signal-driven baseline vs disabled/enabled/throwing-observer order/state parity; 30-second range joined through selection/entry set; BUY partial1 then2 with repricing and grace/suppression/loss, trail arm/peak/strict floor retreat; 9 whole-contract lots and9 SELLfills reconstructed');
 
   const stalledUrl = new URL(`data:text/javascript,${encodeURIComponent("import {parentPort} from 'node:worker_threads'; parentPort.postMessage({type:'ready'}); setInterval(()=>{},1000);")}`);
   const stalled = createTrace({ directory: join(temp, 'stalled'), capacity: 8, batchSize: 2, flushMs: 10, shutdownMs: 100, workerUrl: stalledUrl });

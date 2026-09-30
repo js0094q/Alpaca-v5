@@ -29,7 +29,8 @@ c.save([{ ...trade, anchorBid: 1.2, profitFloor: 1.28 }]); // 3. +$0.05 from max
 assert.deepEqual([c.load().trades[0].anchorBid, c.load().trades[0].profitFloor], [1.2, 1.28]);
 c.save([{ ...trade, anchorBid: 1.2, profitFloor: 1.31 }]); // 4. +$0.08 from max(entry, raw anchor) survives
 assert.deepEqual([c.load().trades[0].anchorBid, c.load().trades[0].profitFloor], [1.2, 1.31]);
-assert.throws(() => c.save([{ ...trade, anchorBid: 1.2, profitFloor: 1.25 }]), /invalid active continuity state/); // reject old raw-anchor-based floor below entry-based threshold
+assert.equal((c.save([{ ...trade, anchorBid: 1.2, profitFloor: 1.21 }]), c.load().trades[0].profitFloor), 1.21); // initial trail floor may start 2c below reference
+assert.throws(() => c.save([{ ...trade, anchorBid: 1.2, profitFloor: 1.20 }]), /invalid active continuity state/); // reject a floor below the permitted trail start
 const legacyProtected = { tradeId: 'legacy', executionId: 'legacy-buy', symbol: trade.symbol, entryPrice: 1.23, fillTimestampMs: 1_000, remainingQty: 1, profitFloor: 1.28, sellLatched: false, logicalSellId: null, orderId: null };
 writeFileSync(path, JSON.stringify({ version: 1, trades: [legacyProtected] })); // pre-anchor v1 state has no anchorBid field
 assert.equal(c.load().status, 'incompatible'); // do not silently reinterpret an armed legacy trade without raw anchor provenance
@@ -79,6 +80,15 @@ assert.equal(reconcileContinuity({ positions: [{ symbol: trade.symbol, qty: 2 }]
 c.clear();
 assert.equal(c.load().status, 'missing'); // 9. confirmed FLAT clears state
 
+const pauseState = { date: '2026-09-23', until: Date.parse('2026-09-23T15:31:00-04:00') };
+const setState = { tradeSetId: 'v5-buy-set', date: '2026-09-23', known: true, entryQty: 3, entryCentQty: 300, exitQty: 1, exitCentQty: 98, entryTerminal: true, closedAt: null };
+c.save([], { pause: pauseState, sets: [setState] });
+assert.deepEqual([c.load().pause, c.load().sets], [pauseState, [setState]]); // same-day runtime data survives while broker flat
+c.save([trade]);
+assert.deepEqual([c.load().pause, c.load().sets], [pauseState, [setState]]); // position callbacks preserve runtime fields
+c.save([], { pause: null, sets: [] });
+assert.equal(c.load().status, 'missing');
+
 const calls = [];
 const p = createPositions({ broker: {
   submitOrder: async (order) => { calls.push(order); return { id: `sell-${calls.length}`, status: 'accepted' }; },
@@ -87,14 +97,14 @@ const p = createPositions({ broker: {
 p.onFill({ tradeId: 'live', executionId: 'buy-live', symbol: trade.symbol, entryPrice: 1, timestamp: 1 });
 p.onQuote({ symbol: trade.symbol, bid: 1, ask: 1.01, timestamp: 10_001 });
 assert.equal(c.load().trades[0].anchorBid, 1);
-p.onQuote({ symbol: trade.symbol, bid: 1.05, ask: 1.06, timestamp: 10_002 });
-assert.equal(c.load().trades[0].profitFloor, 1.05); // actual +$0.05 arm persisted
+p.onQuote({ symbol: trade.symbol, bid: 1.02, ask: 1.03, timestamp: 10_002 });
+assert.equal(c.load().trades[0].profitFloor, 0.98); // arm floor is 4c below first qualifying bid
 p.onQuote({ symbol: trade.symbol, bid: 1.08, ask: 1.09, timestamp: 10_003 });
-assert.equal(c.load().trades[0].profitFloor, 1.08); // actual +$0.08 re-arm persisted
+assert.equal(c.load().trades[0].profitFloor, 1.04); // peak−4c floor only moves upward
 const resumed = createPositions({ broker: { submitOrder: async () => ({ id: 'resumed-sell', status: 'accepted' }) } });
 resumed.restoreTrade(c.load().trades[0]);
-resumed.onQuote({ symbol: trade.symbol, bid: 1.07, ask: 1.08, timestamp: 10_004 });
-assert.deepEqual([resumed.getTrades()[0].anchorBid, resumed.getTrades()[0].profitFloor, resumed.getTrades()[0].sellLatched], [1, 1.08, true]);
+resumed.onQuote({ symbol: trade.symbol, bid: 1.03, ask: 1.04, timestamp: 10_004 });
+assert.deepEqual([resumed.getTrades()[0].anchorBid, resumed.getTrades()[0].profitFloor, resumed.getTrades()[0].sellLatched], [1, 1.04, true]);
 p.onQuote({ symbol: trade.symbol, bid: 0.95, ask: 0.96, timestamp: 10_004 });
 await Promise.resolve();
 assert.equal(c.load().trades[0].sellLatched, true); // actual persistent SELL latch persisted

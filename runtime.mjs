@@ -6,6 +6,7 @@ import { createContinuity, reconcileContinuity } from './continuity.mjs';
 import { createSipProcessor } from './sip.mjs';
 
 export const FIVE_SECONDS = 5_000;
+const LOSS_PAUSE_MS = 60_000;
 export const WARMUP_MS = 30_000;
 const OWNERSHIP_CHECK_MS = 5_000;
 const isSpyOption = (symbol) => /^SPY\d{6}[CP]\d{8}$/.test(String(symbol));
@@ -27,6 +28,8 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
   let finalizedDate = null;
   let warmupUntil = 0;
   let cooldownUntil = 0;
+  let activePause = null;
+  let setAccounting = new Map();
   let entryState = { active: false };
   let started = false;
   let recovering = false;
@@ -56,6 +59,45 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
   ]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
   const setState = (next, data) => { if (executionIssues.length) next = 'BLOCKED_EXECUTION'; if (state !== next) { observe(telemetry, 'runtime_state', { priorState: state, state: next }); state = next; safeLedger(next, data); } };
   const entryActive = () => Boolean(entryState.active);
+  const cents = (value) => Number.isFinite(Number(value)) ? Math.round(Number(value) * 100) : null;
+  const persistContinuity = () => continuity.save(trades(), { pause: activePause, sets: [...setAccounting.values()] });
+  const finishSetIfReady = (record) => {
+    if (record && !record.known && !hasOwnership() && !entryActive() && cancelingBuys.size === 0) {
+      safeLedger('LOSS_PAUSE', { tradeSetId: record.tradeSetId, result: 'unknown', pauseUntil: null });
+      setAccounting.delete(record.tradeSetId);
+      persistContinuity();
+      return true;
+    }
+    if (!record || !record.entryTerminal || record.closedAt === null || Math.abs(record.exitQty - record.entryQty) > 1e-6) return false;
+    if (record.known) {
+      const grossCentQty = Math.round((record.exitCentQty - record.entryCentQty) * 1_000_000);
+      if (grossCentQty < 0) {
+        const until = record.closedAt + LOSS_PAUSE_MS;
+        activePause = until > now() ? { date: record.date, until: Math.max(until, activePause?.date === record.date ? activePause.until : 0) } : null;
+        cooldownUntil = Math.max(cooldownUntil, nowMono() + Math.max(0, until - now()));
+        setState('COOLDOWN', { until: cooldownUntil, pauseUntil: until, pauseReason: 'losing_buy' });
+        safeLedger('LOSS_PAUSE', { tradeSetId: record.tradeSetId, result: 'loss', grossCentQty, pauseUntil: until });
+      } else {
+        safeLedger('LOSS_PAUSE', { tradeSetId: record.tradeSetId, result: grossCentQty === 0 ? 'zero' : 'profit', grossCentQty, pauseUntil: null });
+      }
+    } else {
+      safeLedger('LOSS_PAUSE', { tradeSetId: record.tradeSetId, result: 'unknown', pauseUntil: null });
+    }
+    setAccounting.delete(record.tradeSetId);
+    persistContinuity();
+    return true;
+  };
+  const recordEntryState = () => {
+    const current = entry?.getState?.();
+    const record = current?.clientOrderId ? setAccounting.get(current.clientOrderId) : null;
+    if (!record) return;
+    const orderStatus = String(current.orderStatus ?? '').toLowerCase();
+    record.entryTerminal = current.state === 'DONE' || current.filled >= 3 || ['canceled', 'cancelled', 'done', 'expired', 'rejected'].includes(orderStatus);
+    if (record.entryTerminal) {
+      persistContinuity();
+      finishSetIfReady(record);
+    }
+  };
   const finalizeLedger = (date) => {
     if (!date || finalizedDate === date) return;
     finalizedDate = date;
@@ -71,6 +113,11 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     signal.reset(current);
     signal.setSession(session);
     sip.reset();
+    if (activePause && activePause.date !== session.date) {
+      activePause = null;
+      cooldownUntil = 0;
+      persistContinuity();
+    }
     safeLedger('DAY_START', { date: session.date, ledgerId: `v5-day-${session.date}` });
   };
 
@@ -85,7 +132,23 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
       safeLedger('EXECUTION_ISSUE', issue); setState('BLOCKED_EXECUTION', issue);
     }
   }, onState: (s) => { if (!hydrating) continuity.save(positions.getTrades()); if (s?.state) setState(s.state, s); }, now, nowMono });
-  const entry = createEntry({ broker, telemetry, canSubmit: () => { const current = now(), session = calendar.sessionFor(current); return (stopAtMs === null || current < stopAtMs) && session?.status === 'open' && session.date === sessionDate && entryCutoffMinutes(current) < buyCutoffMinuteET && (!session.cutoff || current < Date.parse(session.cutoff)); }, getContracts, getQuote, nowMono, onFill: (fill) => { safeLedger('FILL', fill); positions.onFill(fill); }, onState: (s) => { entryState = s; const status = s?.status ?? s?.state; if (['IDLE', 'DONE', 'canceled', 'rejected', 'expired'].includes(status) && !hasOwnership() && cancelingBuys.size === 0) { if (state !== 'COOLDOWN') { entry.ready?.(); setState('FLAT'); } } scheduleDeadline(); } });
+  let entry;
+  entry = createEntry({ broker, telemetry, canSubmit: () => { const current = now(), session = calendar.sessionFor(current); return (stopAtMs === null || current < stopAtMs) && session?.status === 'open' && session.date === sessionDate && entryCutoffMinutes(current) < buyCutoffMinuteET && (!session.cutoff || current < Date.parse(session.cutoff)); }, getContracts, getQuote, nowMono, onFill: (fill) => {
+    safeLedger('FILL', fill);
+    const priceCents = cents(fill.entryPrice);
+    if (fill.tradeSetId && priceCents !== null) {
+      let record = setAccounting.get(fill.tradeSetId);
+      if (!record) {
+        const current = now(), session = calendar.sessionFor(current);
+        record = { tradeSetId: fill.tradeSetId, date: session?.date ?? sessionDate, known: true, entryQty: 0, entryCentQty: 0, exitQty: 0, exitCentQty: 0, entryTerminal: false, closedAt: null };
+        setAccounting.set(fill.tradeSetId, record);
+      }
+      record.entryQty += 1;
+      record.entryCentQty += priceCents;
+    }
+    positions.onFill(fill);
+    persistContinuity();
+  }, onState: (s) => { entryState = s; recordEntryState(); const status = s?.status ?? s?.state; if (['IDLE', 'DONE', 'canceled', 'rejected', 'expired'].includes(status) && !hasOwnership() && cancelingBuys.size === 0) { if (state !== 'COOLDOWN') { entry.ready?.(); setState('FLAT'); } } scheduleDeadline(); } });
   const signal = createSignal({ onBreakout, telemetry, entryCutoffMinuteET });
   const sip = createSipProcessor({ onTrade: (trade, receivedAt) => signal.onTrade(trade, receivedAt), onCorrection: (change, receivedAt) => signal.onCorrection(change, receivedAt), onCancel: (change, receivedAt) => signal.onCancel(change, receivedAt) });
 
@@ -99,6 +162,12 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     }
     const exposure = (snapshot.positions ?? []).filter((p) => Number(p.qty ?? p.quantity ?? 0) > 0 && isSpyOption(p.symbol));
     const saved = continuity.load();
+    const currentSession = calendar.sessionFor(now());
+    activePause = saved.pause && currentSession?.date === saved.pause.date && saved.pause.until > now() ? saved.pause : null;
+    cooldownUntil = activePause ? nowMono() + (activePause.until - now()) : 0;
+    setAccounting = new Map((saved.sets ?? []).map((record) => [record.tradeSetId, { ...record }]));
+    const openBuys = new Set((snapshot.orders ?? []).filter((order) => order?.side === 'buy' && ['new', 'accepted', 'pending_new', 'partially_filled', 'pending_replace', 'pending_cancel'].includes(order.status)).map((order) => order.clientOrderId ?? order.client_order_id));
+    for (const record of setAccounting.values()) if (!openBuys.has(record.tradeSetId)) record.entryTerminal = true;
     const tracked = new Set(saved.status === 'compatible' ? saved.trades.map((trade) => trade.symbol) : []);
     if (tracked.size && snapshot.positions.some((row) => {
       if (!row || typeof row.symbol !== 'string' || !row.symbol) return true;
@@ -113,9 +182,17 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     }
     const continuityState = reconcileContinuity({ ...snapshot, positions: exposure }, saved);
     if (continuityState.status === 'flat') {
-      continuity.clear();
+      for (const record of [...setAccounting.values()]) {
+        if (record.known && record.date === currentSession?.date && record.entryTerminal && record.closedAt !== null && Math.abs(record.exitQty - record.entryQty) <= 1e-6) finishSetIfReady(record);
+      }
+      setAccounting.clear();
+      continuity.save([], { pause: activePause, sets: [] });
     } else if (continuityState.status === 'compatible') {
       recovering = continuityState.trades.some((trade) => trade.entryPrice === null);
+      for (const trade of continuityState.trades) if (trade.tradeSetId && !setAccounting.has(trade.tradeSetId)) {
+        const current = now(), session = calendar.sessionFor(current);
+        setAccounting.set(trade.tradeSetId, { tradeSetId: trade.tradeSetId, date: session?.date ?? sessionDate, known: false, entryQty: 0, entryCentQty: 0, exitQty: 0, exitCentQty: 0, entryTerminal: false, closedAt: null });
+      }
       hydrating = true;
       try {
         for (const trade of continuityState.trades) {
@@ -141,7 +218,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
           if (uncovered > 0) positions.recoverLostPlace({ symbol, remainingQty: uncovered });
         }
       } finally { hydrating = false; }
-      continuity.save(positions.getTrades());
+      persistContinuity();
       safeLedger('LOST_PLACE_RECOVERY', { positions: exposure.map((p) => ({ symbol: p.symbol, qty: p.qty ?? p.quantity })) });
     }
     started = true;
@@ -221,7 +298,13 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
   function onOrderUpdate(update) {
     observe(telemetry, 'trade_update_received', { orderId: update.orderId, clientOrderId: update.clientOrderId, symbol: update.symbol, side: update.side, orderEvent: update.event, executionId: update.executionId, fillQty: update.fillQty, fillPrice: update.fillPrice, brokerTimestamp: update.timestamp, replacedBy: update.replacedBy });
     if (cancelingBuys.has(update.orderId) && ['canceled', 'rejected', 'expired'].includes(update.event)) cancelingBuys.delete(update.orderId);
-    entry.onOrderUpdate(update); positions.onOrderUpdate(update);
+    entry.onOrderUpdate(update); positions.onOrderUpdate(update); recordEntryState();
+    const fillSet = update.clientOrderId ? setAccounting.get(update.clientOrderId) : null;
+    if (fillSet && update.side === 'buy' && ['fill', 'canceled', 'cancelled', 'rejected', 'expired', 'done'].includes(String(update.event).toLowerCase())) {
+      fillSet.entryTerminal = true;
+      persistContinuity();
+      finishSetIfReady(fillSet);
+    }
     if (state !== 'COOLDOWN' && update.side === 'buy' && cancelingBuys.size === 0 && !hasOwnership() && !entryActive() && ['canceled', 'rejected', 'expired'].includes(update.event)) setState('FLAT');
   }
 
@@ -244,21 +327,31 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
       setState(session?.status === 'open' ? 'FLAT' : 'WAITING', session?.status === 'open' ? {} : { nextDate: session?.nextDate, nextOpen: session?.nextOpen });
     }
     else if (!hasOwnership() && state !== 'BLOCKED_OWNERSHIP' && state !== 'COOLDOWN' && state !== 'BUYING' && entryActive() === false && session?.status !== 'open') setState('WAITING', { nextDate: session?.nextDate, nextOpen: session?.nextOpen });
-    else if (!hasOwnership() && ['STARTING', 'WAITING'].includes(state) && session?.status === 'open' && cancelingBuys.size === 0) setState('FLAT');
+    else if (!hasOwnership() && ['STARTING', 'WAITING'].includes(state) && session?.status === 'open' && cancelingBuys.size === 0) setState(nowMono() < cooldownUntil ? 'COOLDOWN' : 'FLAT');
     if (hasOwnership() && nowMono() >= nextOwnershipScanAt && !ownershipScan) void inspectCurrentOwnership().catch(() => {});
     scheduleDeadline();
   }
 
   function onExit(event) {
     safeLedger('EXIT', event);
+    const record = event.tradeSetId ? setAccounting.get(event.tradeSetId) : null;
+    const priceCents = cents(event.price);
+    if (record && record.known && priceCents !== null && Number.isFinite(Number(event.qty)) && Number(event.qty) > 0) {
+      record.exitQty += Number(event.qty);
+      record.exitCentQty += priceCents * Number(event.qty);
+      if (Math.abs(record.exitQty - record.entryQty) <= 1e-6) record.closedAt = now();
+    }
+    persistContinuity();
     if (!hasLongOwnership()) {
       if (recovering) {
         void broker.inspectCurrentState().then((current) => {
           const open = (current.positions ?? []).some((p) => Number(p.qty ?? p.quantity ?? 0) !== 0 && isSpyOption(p.symbol));
-          if (!open) { recovering = false; continuity.clear(); cooldownUntil = nowMono() + FIVE_SECONDS; setState('COOLDOWN', { until: cooldownUntil }); }
+          if (!open) { recovering = false; setAccounting.clear(); continuity.save([], { pause: activePause, sets: [] }); cooldownUntil = nowMono() + FIVE_SECONDS; setState('COOLDOWN', { until: cooldownUntil }); }
         }).catch(() => {});
       } else { cooldownUntil = nowMono() + FIVE_SECONDS; setState('COOLDOWN', { until: cooldownUntil }); }
     }
+    if (record) finishSetIfReady(record);
+    else persistContinuity();
   }
   async function start() { await startup(); timer = setInterval(tick, 500); scheduleDeadline(); return stop; }
   function stop() { clearInterval(timer); clearTimeout(deadlineTimer); timer = deadlineTimer = undefined; }
@@ -267,7 +360,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     inspectCurrentOwnership, hasOwnership,
     getState: () => {
       const entrySnapshot = entry.getState();
-      return { state, sessionDate, ledgerDate, cooldownUntil, warmupUntil, blockers: [...executionIssues], entry: entrySnapshot };
+      return { state, sessionDate, ledgerDate, cooldownUntil, lossPauseUntil: activePause?.until ?? null, warmupUntil, blockers: [...executionIssues], entry: entrySnapshot };
     },
     observeDrain(snapshot, final, ledgerWrites = {}) {
       try {

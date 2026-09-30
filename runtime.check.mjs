@@ -73,7 +73,7 @@ try {
   wall += 1_000;
   runtime.onQuote({ symbol, bid: 1.05, ask: 1.06, timestamp: new Date(wall).toISOString() });
   wall += 1_000;
-  runtime.onQuote({ symbol, bid: 1.04, ask: 1.05, timestamp: new Date(wall + 1_000).toISOString() });
+  runtime.onQuote({ symbol, bid: 1.00, ask: 1.01, timestamp: new Date(wall + 1_000).toISOString() }); // below the +2/−4 trail floor
   await flush(); await flush();
   const sells = [...broker.orders.values()].filter((o) => o.side === 'sell');
   assert.equal(sells.length, 3, 'owned SELL management remains allowed at broker BUY cutoff'); assert.ok(sells.every((o) => o.qty === 1));
@@ -83,7 +83,7 @@ try {
   providerStatus('wss://stream.data.alpaca.markets/v2/sip', 'reconnected');
   assert.equal(runtime.getState().warmupUntil, wall + 30_000);
   assert.equal(runtime.getState().state, 'MANAGING', 'ownership remains until broker SELL fills');
-  for (const sell of sells) runtime.onOrderUpdate({ event: 'fill', side: 'sell', orderId: sell.id, clientOrderId: sell.clientOrderId, executionId: `sell-${sell.id}`, fillQty: 1, fillPrice: 1.04, timestamp: new Date(wall + 2_000).toISOString() });
+  for (const sell of sells) runtime.onOrderUpdate({ event: 'fill', side: 'sell', orderId: sell.id, clientOrderId: sell.clientOrderId, executionId: `sell-${sell.id}`, fillQty: 1, fillPrice: 1.00, timestamp: new Date(wall + 2_000).toISOString() });
   assert.equal(runtime.getState().state, 'COOLDOWN');
   mono = 4_999; runtime.tick(); assert.equal(runtime.getState().state, 'COOLDOWN');
   mono = 5_000; runtime.tick(); assert.equal(runtime.getState().state, 'FLAT');
@@ -109,6 +109,25 @@ try {
     assert.equal(cutoffBroker.orders.size, 0, `${time} source time is rejected by runtime entry gate`);
   }
 } finally { cutoffRuntime.stop(); }
+
+// A restored same-day loss pause may extend beyond 15:30, but the pause cannot
+// widen the session entry window or permit a BUY at the broker cutoff.
+{
+  const cutoff = Date.parse('2026-09-23T15:30:00-04:00');
+  let pauseWall = cutoff - 60_000, pauseMono = 0;
+  const saved = continuity();
+  saved.save([], { pause: { date: '2026-09-23', until: cutoff + 60_000 }, sets: [] });
+  const pauseBroker = makeBroker();
+  const pauseRuntime = createRuntime({ broker: pauseBroker, calendar, now: () => pauseWall, nowMono: () => pauseMono, continuity: saved, ...options });
+  try {
+    await pauseRuntime.startup();
+    assert.equal(pauseRuntime.getState().lossPauseUntil, cutoff + 60_000);
+    for (let i = 0; i < 30; i += 1) pauseRuntime.onTrade({ timestamp: new Date(cutoff - 30_000 + i * 1_000).toISOString(), price: 659 });
+    pauseWall = cutoff; pauseMono = 60_000;
+    pauseRuntime.onTrade({ timestamp: new Date(cutoff).toISOString(), price: 660 });
+    assert.equal([...pauseBroker.orders.values()].filter((order) => order.side === 'buy').length, 0);
+  } finally { pauseRuntime.stop(); }
+}
 
 // A missed SELL fill or external close must release stale local ownership only after complete broker-flat evidence.
 const makeRecovery = async ({ trade = {}, extraTrades = [], startupPositions = [{ symbol, qty: 1 }], startupOrders = [], submitOrder } = {}) => {
@@ -203,7 +222,7 @@ try {
   resolveRead({ positions: [], orders: [] });
   await flush(); await flush();
   assert.equal(changedDuringRead.runtime.getState().state, 'MANAGING', 'stale asynchronous read cannot clear changed local ownership');
-  assert.equal(changedDuringRead.saved.load().trades[0].profitFloor, 1.05);
+  assert.equal(changedDuringRead.saved.load().trades[0].profitFloor, 1.01, 'first +5c peak protects peak minus 4c');
 } finally { changedDuringRead.runtime.stop(); }
 
 for (const unsafe of [
@@ -319,12 +338,14 @@ for (const childEvent of ['canceled', 'fill', 'unknown']) {
     executionWall += 10_000;
     raceRuntime.onQuote({ symbol, bid: 1, ask: 1.01, timestamp: new Date(executionWall).toISOString() });
     executionWall++;
-    raceRuntime.onQuote({ symbol, bid: 1.10, ask: 1.11, timestamp: new Date(executionWall).toISOString() });
+    raceRuntime.onQuote({ symbol, bid: 1.10, ask: 1.11, timestamp: new Date(executionWall).toISOString() }); // establish trail peak and floor at 1.06
     await flush(); await flush();
-    const sell = [...raceBroker.orders.values()].find((order) => order.side === 'sell');
-    raceRuntime.onQuote({ symbol, bid: 1.09, ask: 1.10, timestamp: new Date(++executionWall).toISOString() });
+    raceRuntime.onQuote({ symbol, bid: 1.05, ask: 1.06, timestamp: new Date(++executionWall).toISOString() });
+    await flush(); await flush();
+    const latchedSell = [...raceBroker.orders.values()].find((order) => order.side === 'sell');
+    raceRuntime.onQuote({ symbol, bid: 1.04, ask: 1.05, timestamp: new Date(++executionWall).toISOString() });
     assert.equal(typeof resolveReplacement, 'function');
-    raceRuntime.onOrderUpdate({ event: 'fill', side: 'sell', orderId: sell.id, clientOrderId: sell.clientOrderId, executionId: 'race-original', fillQty: 1, fillPrice: 1.10, timestamp: new Date(executionWall).toISOString() });
+    raceRuntime.onOrderUpdate({ event: 'fill', side: 'sell', orderId: latchedSell.id, clientOrderId: latchedSell.clientOrderId, executionId: 'race-original', fillQty: 1, fillPrice: 1.05, timestamp: new Date(executionWall).toISOString() });
     executionMono = 5_000; raceRuntime.tick();
     assert.notEqual(raceRuntime.getState().state, 'FLAT', 'pending HTTP replacement blocks flat');
     if (childEvent === 'unknown') {
@@ -333,7 +354,7 @@ for (const childEvent of ['canceled', 'fill', 'unknown']) {
       raceRuntime.tick();
       assert.equal(raceRuntime.getState().state, 'BLOCKED_EXECUTION');
       assert.ok(raceRuntime.getState().blockers.some((issue) => issue.reason === 'SELL_REPLACE_UNKNOWN'));
-      raceRuntime.onOrderUpdate({ event: 'new', side: 'sell', orderId: 'race-child', replaces: sell.id });
+      raceRuntime.onOrderUpdate({ event: 'new', side: 'sell', orderId: 'race-child', replaces: latchedSell.id });
       assert.equal(raceRuntime.hasOwnership(), true, 'known replacement child still pending after issue resolves');
       assert.deepEqual(raceRuntime.getState().blockers, []);
     } else resolveReplacement({ id: 'race-child', status: 'new' });

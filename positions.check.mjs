@@ -8,13 +8,13 @@ export async function demo() {
   for (const id of ['a', 'b', 'c']) p.onFill({ executionId: 'buy-1', tradeId: id, symbol: 'SPY', entryPrice: 1, timestamp: 1 });
   p.onQuote({ symbol: 'SPY', bid: 1, ask: 1.01, timestamp: 10_001 }); // shared T+10 anchor
   assert.deepEqual(p.getTrades().map((t) => t.anchorBid), [1, 1, 1]);
-  p.onQuote({ symbol: 'SPY', bid: 1.05, ask: 1.06, timestamp: 10_002 }); assert.deepEqual(p.getTrades().map((t) => t.profitFloor), [1.05, 1.05, 1.05]);
-  p.onQuote({ symbol: 'SPY', bid: 1.08, ask: 1.09, timestamp: 10_003 }); assert.deepEqual(p.getTrades().map((t) => t.profitFloor), [1.08, 1.08, 1.08]);
-  p.onQuote({ symbol: 'SPY', bid: 1.07, ask: 1.08, timestamp: 10_004 });
-  p.onQuote({ symbol: 'SPY', bid: 1.06, ask: 1.07, timestamp: 10_005 });
-  await Promise.resolve(); await Promise.resolve(); assert.equal(calls.length, 6);
-  p.onQuote({ symbol: 'SPY', bid: 1.06, ask: 1.07, timestamp: 10_006 });
-  await Promise.resolve(); assert.equal(calls.length, 6);
+  p.onQuote({ symbol: 'SPY', bid: 1.02, ask: 1.03, timestamp: 10_002 }); assert.deepEqual(p.getTrades().map((t) => t.profitFloor), [0.98, 0.98, 0.98]);
+  p.onQuote({ symbol: 'SPY', bid: 1.15, ask: 1.16, timestamp: 10_003 }); assert.deepEqual(p.getTrades().map((t) => t.profitFloor), [1.11, 1.11, 1.11]);
+  p.onQuote({ symbol: 'SPY', bid: 1.11, ask: 1.12, timestamp: 10_004 });
+  p.onQuote({ symbol: 'SPY', bid: 1.10, ask: 1.11, timestamp: 10_005 });
+  await Promise.resolve(); await Promise.resolve(); assert.equal(calls.length, 3);
+  p.onQuote({ symbol: 'SPY', bid: 1.10, ask: 1.11, timestamp: 10_006 });
+  await Promise.resolve(); assert.equal(calls.length, 3);
   p.onOrderUpdate({ orderId: 's1', executionId: 'sell-a', fillQty: 0.5, fillPrice: 1.07, timestamp: 5 }); p.onOrderUpdate({ orderId: 's1', executionId: 'sell-a', fillQty: 0.5, fillPrice: 1.07, timestamp: 6 }); assert.equal(exits.length, 1); assert.equal(p.getTrades()[0].remainingQty, 0.5);
   p.onQuote({ symbol: 'SPY', bid: 1.10, ask: 1.11, timestamp: 10_007 });
   p.onFill({ executionId: 'buy-1', tradeId: 'e', symbol: 'QQQ', entryPrice: 1, timestamp: 8 });
@@ -27,7 +27,7 @@ export async function demo() {
   assert.deepEqual(positionEvents.filter(({ event, fields }) => event === 'position_quote_accepted' && fields.tradeId === 'f').map(({ fields }) => [fields.source, fields.sourceTimestamp, fields.quoteTimestamp]), [['cached_at_fill', 10_009, 10_009]]);
   await Promise.resolve();
   const before = calls.length; p.onQuote({ symbol: 'SPY', bid: 1.10, ask: 1.11, timestamp: 10_007 }); await Promise.resolve(); assert.equal(calls.length, before);
-  p.onFill({ executionId: 'buy-1', tradeId: 'd', symbol: 'SPY', entryPrice: 1, timestamp: -9_999 }); p.onQuote({ symbol: 'SPY', bid: 1.20, ask: 1.21, timestamp: 10_010 });
+  p.onFill({ executionId: 'buy-1', tradeId: 'd', symbol: 'SPY', entryPrice: 1, timestamp: -9_999 }); p.onQuote({ symbol: 'SPY', bid: 1.20, ask: 1.21, timestamp: 10_010 }); p.onQuote({ symbol: 'SPY', bid: 1.15, ask: 1.16, timestamp: 10_011 });
   const d = p.getTrades().find((t) => t.tradeId === 'd'); p.onOrderUpdate({ orderId: 'preack', clientOrderId: d.logicalSellId, executionId: 'sell-d', fillQty: 1, fillPrice: 1.10, timestamp: 11 }); assert.equal(p.getTrades().find((t) => t.tradeId === 'd').remainingQty, 0);
 
   let wall = Date.parse('2026-09-22T14:00:00.000Z');
@@ -82,11 +82,14 @@ export async function demo() {
   profit.onQuote({ symbol: 'PROFIT', bid: 1, ask: 1.01, timestamp: '2026-09-22T15:00:09Z' }); // accepted exactly T+10 despite earlier source time
   assert.equal(profit.getTrades()[0].anchorBid, 1);
   profitNow += 1;
-  profit.onQuote({ symbol: 'PROFIT', bid: 1.05, ask: 1.06, timestamp: '2026-09-22T15:00:11Z' });
-  assert.equal(profit.getTrades()[0].profitFloor, 1.05);
+  profit.onQuote({ symbol: 'PROFIT', bid: 1.02, ask: 1.03, timestamp: '2026-09-22T15:00:11Z' });
+  assert.equal(profit.getTrades()[0].profitFloor, 0.98);
   profit.onQuote({ symbol: 'PROFIT', bid: 1.05, ask: 1.06, timestamp: '2026-09-22T15:00:12Z' });
-  assert.equal(profit.getTrades()[0].sellLatched, false); // floor latches only when bid is strictly below it
-  profit.onQuote({ symbol: 'PROFIT', bid: 1.04, ask: 1.05, timestamp: '2026-09-22T15:00:13Z' });
+  assert.equal(profit.getTrades()[0].profitFloor, 1.01);
+  assert.equal(profit.getTrades()[0].sellLatched, false);
+  profit.onQuote({ symbol: 'PROFIT', bid: 1.01, ask: 1.02, timestamp: '2026-09-22T15:00:13Z' });
+  assert.equal(profit.getTrades()[0].sellLatched, false); // equality holds
+  profit.onQuote({ symbol: 'PROFIT', bid: 1.00, ask: 1.01, timestamp: '2026-09-22T15:00:14Z' });
   assert.equal(profit.getTrades()[0].sellLatched, true);
 
   const clamped = createPositions({ broker });
@@ -103,11 +106,11 @@ export async function demo() {
   aboveEntry.onQuote({ symbol: 'ABOVE', bid: 0.99, ask: 1, timestamp: 11_002 });
   assert.equal(aboveEntry.getTrades()[0].sellLatched, true); // 90% anchor raises the protected floor to $0.99
 
-  // Raw anchor provenance is retained, while all protection thresholds use max(entry, raw anchor).
-  for (const [tradeId, rawAnchor, reference, arm, rearm, ceiling] of [
-    ['below-entry', 0.95, 1.00, 1.05, 1.08, 1.10],
-    ['at-entry', 1.00, 1.00, 1.05, 1.08, 1.10],
-    ['above-entry', 1.20, 1.20, 1.25, 1.28, 1.30]
+  // Raw anchor provenance is retained; the effective reference drives trail arming.
+  for (const [tradeId, rawAnchor, reference, arm] of [
+    ['below-entry', 0.95, 1.00, 1.02],
+    ['at-entry', 1.00, 1.00, 1.02],
+    ['above-entry', 1.20, 1.20, 1.22]
   ]) {
     let now = 20_000;
     const events = [];
@@ -117,31 +120,19 @@ export async function demo() {
     let trade = referenceLot.getTrades()[0];
     assert.deepEqual([trade.anchorBid, trade.sellLatched], [rawAnchor, false], `${tradeId}: raw anchor remains visible`);
     const anchorDecision = events.findLast((event) => event.event === 'lot_decision');
-    assert.deepEqual([anchorDecision.lossThreshold, anchorDecision.arm5cThreshold, anchorDecision.rearm8cThreshold, anchorDecision.ceiling10cThreshold], [reference * 0.9, arm, rearm, ceiling], `${tradeId}: anchor telemetry uses effective reference`);
+    assert.deepEqual([anchorDecision.lossThreshold, anchorDecision.trailArmThreshold], [reference * 0.9, arm], `${tradeId}: anchor telemetry uses effective reference`);
 
     if (tradeId === 'below-entry') {
       now += 1;
       referenceLot.onQuote({ symbol: 'REFERENCE', bid: 1.00, ask: 1.01, timestamp: 'raw-anchor-plus-5c' });
-      assert.deepEqual([referenceLot.getTrades()[0].profitFloor, events.findLast((event) => event.event === 'lot_decision').action], [null, 'HOLD'], 'raw-anchor +5c cannot arm below the effective entry reference +5c');
+      assert.deepEqual([referenceLot.getTrades()[0].profitFloor, events.findLast((event) => event.event === 'lot_decision').action], [null, 'HOLD'], 'raw anchor cannot arm below effective reference +2c');
     }
 
     now += 1;
     referenceLot.onQuote({ symbol: 'REFERENCE', bid: arm, ask: arm + 0.01, timestamp: 'arm' });
     trade = referenceLot.getTrades()[0];
-    assert.deepEqual([trade.anchorBid, trade.profitFloor, trade.sellLatched], [rawAnchor, arm, false], `${tradeId}: arm uses effective reference and preserves raw anchor`);
-    assert.deepEqual([events.findLast((event) => event.event === 'lot_decision').arm5cThreshold, events.findLast((event) => event.event === 'lot_decision').phase], [arm, 'PROTECTED_5C']);
-
-    now += 1;
-    referenceLot.onQuote({ symbol: 'REFERENCE', bid: rearm, ask: rearm + 0.01, timestamp: 'rearm' });
-    trade = referenceLot.getTrades()[0];
-    assert.deepEqual([trade.profitFloor, trade.sellLatched], [rearm, false], `${tradeId}: rearm uses effective reference`);
-    assert.deepEqual([events.findLast((event) => event.event === 'lot_decision').rearm8cThreshold, events.findLast((event) => event.event === 'lot_decision').phase], [rearm, 'PROTECTED_8C']);
-
-    now += 1;
-    referenceLot.onQuote({ symbol: 'REFERENCE', bid: ceiling, ask: ceiling + 0.01, timestamp: 'ceiling' });
-    assert.equal(referenceLot.getTrades()[0].sellLatched, true, `${tradeId}: effective +10c ceiling latches`);
-    const latchEvent = events.findLast((event) => event.event === 'sell_latch');
-    assert.deepEqual([latchEvent.anchorBid, latchEvent.threshold, latchEvent.reason], [rawAnchor, ceiling, 'ceiling_10c'], `${tradeId}: latch telemetry keeps raw anchor and reports effective ceiling`);
+    assert.deepEqual([trade.anchorBid, trade.profitFloor, trade.sellLatched], [rawAnchor, arm - 0.04, false], `${tradeId}: arm uses actual bid and preserves raw anchor`);
+    assert.deepEqual([events.findLast((event) => event.event === 'lot_decision').trailArmThreshold, events.findLast((event) => event.event === 'lot_decision').phase], [arm, 'TRAILING']);
   }
 
   const anchorLossEvents = [];
@@ -159,7 +150,7 @@ export async function demo() {
   shiftedNow = 11_000;
   shifted.onQuote({ symbol: 'SHIFT', bid: 1.20, ask: 1.21, timestamp: 9_000 });
   shifted.onFill({ executionId: 'buy-shifted', tradeId: 'shifted', symbol: 'SHIFT', entryPrice: 1, timestamp: 1_000 });
-  for (const [bid, floor, latched] of [[1.25, 1.25, false], [1.28, 1.28, false], [1.28, 1.28, false], [1.30, 1.28, true]]) {
+  for (const [bid, floor, latched] of [[1.25, 1.21, false], [1.28, 1.24, false], [1.28, 1.24, false], [1.30, 1.26, false], [1.25, 1.26, true]]) {
     shiftedNow += 1;
     shifted.onQuote({ symbol: 'SHIFT', bid, ask: bid + 0.01, timestamp: 13_000 });
     assert.deepEqual([shifted.getTrades()[0].anchorBid, shifted.getTrades()[0].profitFloor, shifted.getTrades()[0].sellLatched], [1.20, floor, latched], 'later quotes and duplicate fills preserve the original anchor and shifted profit thresholds');
@@ -184,7 +175,7 @@ export async function demo() {
   assert.deepEqual(independent.getTrades().map((trade) => trade.anchorBid), [1, null]);
   independentNow = 16_000;
   independent.onQuote({ symbol: 'INDEPENDENT', bid: 1.10, ask: 1.11, timestamp: 1 });
-  assert.deepEqual(independent.getTrades().map((trade) => [trade.anchorBid, trade.sellLatched]), [[1, true], [1.1, false]]);
+  assert.deepEqual(independent.getTrades().map((trade) => [trade.anchorBid, trade.sellLatched]), [[1, false], [1.1, false]]); // +10c is no longer a ceiling
 
   const legacyRestore = createPositions({ broker, now: () => 11_000 });
   legacyRestore.restoreTrade({ tradeId: 'legacy', executionId: 'legacy-buy', symbol: 'LEGACY', entryPrice: 1, fillTimestampMs: 1_000, remainingQty: 1, profitFloor: 1.05, sellLatched: false, logicalSellId: null, orderId: null });
@@ -193,10 +184,9 @@ export async function demo() {
   assert.deepEqual([legacyRestore.getTrades()[0].anchorBid, legacyRestore.getTrades()[0].profitFloor], [1, null]);
 
   for (const steps of [
-    [[1.05, 'ARM_5C', 'PROTECTED_5C'], [1.05, 'HOLD', 'PROTECTED_5C'], [1.04, 'PROFIT_FLOOR_LATCH', 'SELL_LATCHED']],
-    [[1.08, 'ARM_5C', 'PROTECTED_5C'], [1.08, 'REARM_8C', 'PROTECTED_8C'], [1.08, 'HOLD', 'PROTECTED_8C'], [1.07, 'PROFIT_FLOOR_LATCH', 'SELL_LATCHED']],
-    [[1.10, 'CEILING_10C', 'SELL_LATCHED']],
-    [[1.05, 'ARM_5C', 'PROTECTED_5C'], [1.08, 'REARM_8C', 'PROTECTED_8C'], [1.10, 'CEILING_10C', 'SELL_LATCHED']]
+    [[1.02, 'TRAIL_ARM', 'TRAILING'], [1.01, 'HOLD', 'TRAILING'], [0.97, 'PROFIT_FLOOR_LATCH', 'SELL_LATCHED']],
+    [[1.06, 'TRAIL_ARM', 'TRAILING'], [1.15, 'HOLD', 'TRAILING'], [1.11, 'HOLD', 'TRAILING'], [1.10, 'PROFIT_FLOOR_LATCH', 'SELL_LATCHED']],
+    [[1.50, 'TRAIL_ARM', 'TRAILING'], [1.40, 'PROFIT_FLOOR_LATCH', 'SELL_LATCHED']]
   ]) {
     const events = [], orders = [];
     const ladder = createPositions({
@@ -222,7 +212,7 @@ export async function demo() {
       const latches = events.slice(start).filter((event) => event.event === 'sell_latch');
       assert.equal(latches.length, latched ? 1 : 0);
       if (latched) {
-        assert.deepEqual([latches[0].reason, latches[0].priorPhase, latches[0].phase], [action === 'CEILING_10C' ? 'ceiling_10c' : 'profit_floor', priorPhase, phase]);
+        assert.deepEqual([latches[0].reason, latches[0].priorPhase, latches[0].phase], ['profit_floor', priorPhase, phase]);
         assert.equal(orders[0].side, 'sell');
         assert.equal(orders[0].limitPrice, bid);
       }
@@ -231,6 +221,16 @@ export async function demo() {
     await Promise.resolve();
     assert.equal(orders.length, 1);
   }
+
+  const gappedArm = createPositions({ broker, now: () => 10_001 });
+  gappedArm.onFill({ executionId: 'gap-buy', tradeId: 'gap-lot', symbol: 'GAP', entryPrice: 1, timestamp: 1 });
+  gappedArm.onQuote({ symbol: 'GAP', bid: 1, ask: 1.01, timestamp: 10_001 });
+  gappedArm.onQuote({ symbol: 'GAP', bid: 1.07, ask: 1.08, timestamp: 10_002 });
+  assert.deepEqual([gappedArm.getTrades()[0].profitFloor, gappedArm.getTrades()[0].sellLatched], [1.03, false], 'a gapped arm uses the actual arming bid minus four cents');
+  gappedArm.onQuote({ symbol: 'GAP', bid: 1.03, ask: 1.04, timestamp: 10_003 });
+  assert.equal(gappedArm.getTrades()[0].sellLatched, false, 'equality at the gapped-arm floor holds');
+  gappedArm.onQuote({ symbol: 'GAP', bid: 1.02, ask: 1.03, timestamp: 10_004 });
+  assert.equal(gappedArm.getTrades()[0].sellLatched, true, 'one cent below the gapped-arm floor latches');
   return true;
 }
 if (import.meta.url === `file://${process.argv[1]}`) await demo();

@@ -11,11 +11,11 @@ const CRITICAL_EVENTS = new Set([
   'entry_fill_link', 'entry_set', 'entry_state', 'entry_construction',
   'contract_candidate', 'signal_range', 'signal_accepted_for_selection',
   'trade_update_received', 'position_fill',
-  'position_exit', 'sell_order_update', 'protection_arm_5c', 'protection_rearm_8c',
+  'position_exit', 'sell_order_update',
   'drain_reconciliation', 'post_exit_context', 'post_exit_evidence_status',
   'provider_disconnect', 'broker_api_error', 'provider_api_error', 'calendar_api_error', 'drain_api_error',
 ]);
-const CRITICAL_DECISIONS = new Set(['LOSS_LATCH', 'ARM_5C', 'REARM_8C', 'PROFIT_FLOOR_LATCH', 'CEILING_10C']);
+const CRITICAL_DECISIONS = new Set(['LOSS_LATCH', 'TRAIL_ARM', 'PROFIT_FLOOR_LATCH']);
 
 function isCriticalEvent(event) {
   return CRITICAL_EVENTS.has(event) || /^(buy_|sell_|ledger_|position_restored|ownership_|final_|runtime_state)/.test(event);
