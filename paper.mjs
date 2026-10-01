@@ -7,8 +7,7 @@ import { createAlpacaProviders } from './providers.mjs';
 import { createRuntime } from './runtime.mjs';
 import { createLedger } from './ledger.mjs';
 import { createContinuity } from './continuity.mjs';
-import { loadCloseoutCredentials } from './closeout.mjs';
-import { PAPER_ENV, modeAccountPaths } from './paper-account.mjs';
+import { loadCloseoutCredentials, PAPER_ENV, modeAccountPaths } from './paper-account.mjs';
 import { acquireTradeAuthority, assertManualMarkerClear } from './trade-authority.mjs';
 
 const DEFAULT_ENV = PAPER_ENV;

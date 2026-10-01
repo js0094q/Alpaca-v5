@@ -171,15 +171,17 @@ await pendingEntry;
 const submittedEntry = entry.getState();
 entry.onOrderUpdate({ orderId: submittedEntry.orderId, clientOrderId: submittedEntry.clientOrderId,
   event: 'fill', executionId: entryExecutionId, fillQty: 3, fillPrice: 1, timestamp: new Date(baseMs).toISOString() });
-const actualTrades = positions.getTrades();
+let actualTrades = positions.getTrades();
 assert.equal(actualTrades.length, 3, 'production entry fill creates three position lots');
 currentMs = baseMs + 10_000;
 positions.onQuote({ symbol, bid: 1, ask: 1.01, timestamp: new Date(currentMs).toISOString() });
 currentMs += 1_000;
 positions.onQuote({ symbol, bid: 1.05, ask: 1.06, timestamp: new Date(currentMs).toISOString() });
 currentMs += 1_000;
-positions.onQuote({ symbol, bid: 1.04, ask: 1.05, timestamp: new Date(currentMs).toISOString() });
+positions.onQuote({ symbol, bid: 1, ask: 1.01, timestamp: new Date(currentMs).toISOString() });
 await new Promise((resolve) => setImmediate(resolve));
+assert.ok(positions.getTrades().every((trade) => trade.sellLatched && trade.orderId), 'trail-floor breach submits and latches each SELL before simulated fills');
+actualTrades = positions.getTrades(); // Capture accepted broker order IDs before simulated fills close the lots.
 const exitTimestamp = new Date(currentMs + 1).toISOString();
 for (const [index, trade] of positions.getTrades().entries()) {
   positions.onOrderUpdate({ orderId: trade.orderId, clientOrderId: trade.logicalSellId, event: 'fill',
@@ -201,7 +203,7 @@ assert.ok(autopsySourceTrace.some((row) => row.event === 'position_quote_accepte
   && Number.isFinite(row.fields.receivedMonoMs)), 'actual position quotes preserve source and receipt timing');
 assert.ok(autopsySourceTrace.some((row) => row.event === 'position_exit' && row.fields.executionId === exitExecutionIds[0]
   && row.fields.tradeSetId === submittedEntry.clientOrderId), 'actual exits preserve lot, set, and execution lineage');
-const autopsyLocal = { ledger: { events: [
+const syntheticAutopsyLocal = { ledger: { events: [
   `[2026-09-26T14:00:00Z] FILL tradeId=autopsy-lot executionId=${executionId} symbol=${symbol} qty=2 entryPrice=1`,
   `[2026-09-26T14:00:01Z] EXIT tradeId=autopsy-lot executionId=${exitExecutionId} symbol=${symbol} qty=2 price=1.25`,
 ] }, continuity: { status: 'available', trades: [{ tradeId: 'autopsy-lot', symbol, remainingQty: 0, contractSize: 100 }] } };
@@ -231,7 +233,7 @@ const brokerFills = [
 ];
 const actualLedgerEvents = [
   ...actualEntryEvents.map((row) => `[2026-09-25T13:32:00.000Z] FILL tradeId=${row.fields.tradeId} executionId=${row.fields.executionId} symbol=${row.fields.symbol} qty=1 entryPrice=${row.fields.entryPrice}`),
-  ...actualExits.map((row) => `[2026-09-25T13:32:13.000Z] EXIT tradeId=${row.fields.tradeId} executionId=${row.fields.executionId} symbol=${row.fields.symbol} qty=${row.fields.quantity} price=${row.fields.price}`),
+  ...actualExits.map((row) => `[2026-09-25T13:32:13.000Z] EXIT tradeId=${row.fields.tradeId} executionId=${row.fields.executionId} symbol=${symbol} qty=${row.fields.quantity} price=${row.fields.price}`),
 ];
 const autopsyLocal = { ...baseLocal(), accountHash, ledger: { status: 'available', truncated: false, events: actualLedgerEvents }, continuity: { status: 'available', trades: actualTrades.map((trade) => ({ ...trade, remainingQty: 0, contractSize: 100 })) }, telemetry: telemetrySnapshot(autopsyTrace) };
 autopsyLocal.postExitEvidence = { status: 'available', accountHash, windows: actualExits.map((row) => ({ tradeId: row.fields.tradeId, entrySetId: submittedEntry.clientOrderId, entryExecutionId,
@@ -243,13 +245,13 @@ const autopsyLinks = executionLinks(autopsyLocal, actualBroker, autopsyTrace);
 const selectedLink = autopsyLinks.find((row) => row.tradeId === actualTrades[0].tradeId && row.ledgerEvent === 'EXIT');
 assert.equal(selectedLink.realizedPnlUsd, 25, 'USD P&L uses production lifecycle fill events, exact broker fills, and contract size');
 assert.equal(selectedLink.tradeSetId, submittedEntry.clientOrderId);
-assert.ok(selectedLink.candidates.some((row) => row.fields?.eligible === true));
+assert.ok(selectedLink.candidates.some((row) => row.eligible === true));
 assert.ok(selectedLink.entryEvidence.some((row) => row.event === 'entry_construction'));
-assert.ok(selectedLink.quotesAndThresholds.some((row) => row.event === 'lot_decision' && Number.isFinite(row.fields?.lossThreshold)));
+assert.ok(selectedLink.quotesAndThresholds.some((row) => row.event === 'lot_decision' && Number.isFinite(row.lossThreshold)));
 assert.equal(selectedLink.telemetry.some((row) => row.event === 'POST_EXIT_QUOTE'), true, 'actual worker output joins the actual lifecycle execution autopsy');
 assert.equal(selectedLink.postExitStatus, 'complete', 'post-exit samples attach through actual trade and execution IDs');
 assert.equal(selectedLink.postExitEvidence[0].events.find((row) => row.event === 'POST_EXIT_END').fields.favorableExcursionVsExitFill, 0.15);
-await writeFile(new URL('../telemetry/evidence/lane4-simulated-autopsy.json', import.meta.url), `${JSON.stringify({ provenance: 'deterministic simulated lifecycle fixture; production signal, entry, positions, trace writer and post-exit processor; in-memory broker only; no live or PAPER broker request', sourceTrace: autopsySourceTrace, postExitRows: emittedPostExitRows, brokerFills, ledger: actualLedgerEvents, result: autopsyLinks }, null, 2)}\n`);
+await writeFile(join(autopsyTraceDirectory, 'lane4-simulated-autopsy.json'), `${JSON.stringify({ provenance: 'deterministic simulated lifecycle fixture; production signal, entry, positions, trace writer and post-exit processor; in-memory broker only; no live or PAPER broker request', sourceTrace: autopsySourceTrace, postExitRows: emittedPostExitRows, brokerFills, ledger: actualLedgerEvents, result: autopsyLinks }, null, 2)}\n`);
 await rm(autopsyTraceDirectory, { recursive: true, force: true });
 const wrongSide = baseBroker();
 wrongSide.fills.data[0].side = 'sell';

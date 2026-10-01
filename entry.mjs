@@ -238,10 +238,16 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
       if (!event || !['CALL', 'PUT'].includes(event.direction) || !Number.isFinite(event.spyPrice)) return pause('INVALID_BREAKOUT');
       signalId = `signal-${randomUUID()}`;
       trace('signal_accepted_for_selection', { signalKey: `${event.direction}:${event.timestamp}:${event.spyPrice}`, direction: event.direction, signalTimestamp: event.timestamp, sourceTradeId: event.sourceTradeId, receivedAt: event.receivedAt, spyPrice: event.spyPrice, priorHigh: event.priorHigh, priorLow: event.priorLow, priorCount: event.priorCount });
+      pausedReason = null;
       state = 'SELECTING';
       emit();
       breakout = event;
-      const picked = await choose(event, await getContracts(event.direction, event.timestamp));
+      let picked;
+      try {
+        picked = await choose(event, await getContracts(event.direction, event.timestamp));
+      } catch {
+        return abandon('SELECTION_FAILED');
+      }
       if (!picked.row) return abandon(picked.reason);
       selection = picked;
       contract = picked.row;

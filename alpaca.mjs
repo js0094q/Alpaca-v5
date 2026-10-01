@@ -28,7 +28,11 @@ export function createAlpacaBroker({ key, secret, baseUrl, fetchImpl = fetch, te
     getOrder: (id) => request(`/v2/orders/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(5000) }),
     getOrderFills: (id) => request(`/v2/account/activities/FILL?order_id=${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(5000) }),
     getOrderByClientOrderId: (clientOrderId) => request(`/v2/orders:by_client_order_id?client_order_id=${encodeURIComponent(clientOrderId)}`, { signal: AbortSignal.timeout(5000) }),
-    inspectCurrentState: async () => ({ account: await request('/v2/account'), positions: await request('/v2/positions'), orders: await request('/v2/orders?status=open&nested=true&direction=asc') }),
+    inspectCurrentState: async () => ({
+      account: await request('/v2/account', { signal: AbortSignal.timeout(5000) }),
+      positions: await request('/v2/positions', { signal: AbortSignal.timeout(5000) }),
+      orders: await request('/v2/orders?status=open&nested=true&direction=asc', { signal: AbortSignal.timeout(5000) }),
+    }),
   };
 }
 

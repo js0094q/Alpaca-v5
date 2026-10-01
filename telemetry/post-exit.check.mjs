@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createEvidenceWriter } from './evidence-writer.mjs';
@@ -232,9 +232,9 @@ try {
   await aged.close();
   const retained = (await readdir(paperDirectory)).filter((name) => name.endsWith('.jsonl'));
   assert.equal(retained.length, 1, 'expired window files are removed and their bytes leave the cap accounting');
-  const verificationDirectory = '/Users/josephstew/Documents/Codex/bridge-ZSOVP8/post-exit-verification';
+  const verificationDirectory = join(root, 'verification');
   await mkdir(verificationDirectory, { recursive: true });
-  await copyFile(join(workerDirectory, evidenceFiles[0]), join(verificationDirectory, 'post-exit-sample.jsonl'));
+  await writeFile(join(verificationDirectory, 'post-exit-sample.jsonl'), await readFile(join(workerDirectory, evidenceFiles[0]), 'utf8'));
   await writeFile(join(verificationDirectory, 'post-exit-complete-synthetic.jsonl'), fullWindowText);
   await writeFile(join(verificationDirectory, 'post-exit-check-report.json'), `${JSON.stringify({
     passed: true,
@@ -242,7 +242,7 @@ try {
     checks: ['runner fan-out wiring', 'offline order and position-state equivalence', 'actual position_exit join', 'no false queue-loss gap on an unsaturated worker replay', 'worker persistence and shutdown partial status', 'paper/live and account isolation', 'generic trace rotation isolation', 'duplicate exit execution suppression', 'distinct partial exit executions', 'same-batch queue-loss gap', '30-second boundary sample', 'empty-window partial coverage', 'dense quotes and delayed boundary source', 'complete synthetic sampled window', 'stale source timestamp marking', 'frozen mode/account identity', 'whole-file retention expiration and byte recount'],
     output: ['post-exit-sample.jsonl', 'post-exit-complete-synthetic.jsonl'],
   }, null, 2)}\n`);
-  console.log(`post-exit checks passed; evidence: ${verificationDirectory}`);
+  console.log('post-exit checks passed; temporary evidence removed');
 } finally {
   await rm(root, { recursive: true, force: true });
 }

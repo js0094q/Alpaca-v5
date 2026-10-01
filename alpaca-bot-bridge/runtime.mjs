@@ -1,21 +1,20 @@
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import { randomUUID } from 'node:crypto';
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { lstat, mkdir, open, readFile, readdir, realpath, stat, unlink } from 'node:fs/promises';
+import { lstat, open, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { request as paperRequest } from './broker.mjs';
 import { activeV5 } from '../market-open.mjs';
 import { createContinuity } from '../continuity.mjs';
+export { acquireTradeAuthority, TRADE_AUTHORITY_LOCK } from '../trade-authority.mjs';
 
 const execFile = promisify(execFileCb);
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, '..');
 const ROOT = REPO_ROOT;
 const STATE = join(ROOT, 'state');
-export const TRADE_AUTHORITY_LOCK = join(STATE, 'v5-trade-authority.lock');
 const LAUNCH_LABEL = 'com.josephstew.v5-market-open';
 const LEGACY_PAPER_PLIST = join(process.env.HOME ?? '', 'Library', 'LaunchAgents', `${LAUNCH_LABEL}.plist`);
 const MAX_READ_BYTES = 32 * 1024;
@@ -281,39 +280,6 @@ export async function assertBotStopped() {
   return status;
 }
 
-export async function acquireTradeAuthority(role = 'bridge-manual', { lockPath = TRADE_AUTHORITY_LOCK } = {}) {
-  if (!['bridge-manual', 'v5-paper'].includes(role)) throw new TypeError('invalid trade authority role');
-  const owner = JSON.stringify({ pid: process.pid, role, token: randomUUID(), acquiredAt: new Date().toISOString() });
-  await mkdir(dirname(lockPath), { recursive: true });
-  let handle;
-  try {
-    handle = await open(lockPath, 'wx', 0o600);
-    await handle.writeFile(`${owner}\n`, 'utf8');
-  } catch (error) {
-    await handle?.close().catch(() => {});
-    if (handle) await unlink(lockPath).catch(() => {});
-    if (error.code === 'EEXIST') {
-      let existing = null;
-      try { existing = JSON.parse(await readFile(lockPath, 'utf8')); } catch {}
-      throw Object.assign(new Error('PAPER trade authority is already held or requires operator lock recovery.'), {
-        code: 'PAPER_TRADE_AUTHORITY_LOCKED', owner: existing && { pid: existing.pid, role: existing.role, acquiredAt: existing.acquiredAt },
-      });
-    }
-    throw error;
-  }
-  await handle.close();
-  let released = false;
-  return async () => {
-    if (released) return false;
-    released = true;
-    try {
-      if (await readFile(lockPath, 'utf8') !== `${owner}\n`) return false;
-      await unlink(lockPath);
-      return true;
-    } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
-  };
-}
-
 async function repoStatus() {
   const { stdout } = await execFile('/usr/bin/git', ['-C', ROOT, 'status', '--short', '--branch'], { timeout: 3000, maxBuffer: 256 * 1024 });
   return sanitizeRepoResult({ root: ROOT, status: stdout.slice(0, MAX_LOG_BYTES) });
@@ -400,7 +366,7 @@ async function postExit(mode, args) {
     ...snapshot.postExitEvidence };
 }
 
-export async function readLocalHistory({ mode = 'paper', date, limit = 100, offset = 0, file, eventNames, tradeId, entrySetId, tradeSetId, runId } = {}) {
+export async function readLocalHistory({ mode = 'paper', date, limit = 100, offset = 0, file, eventNames, tradeId, entrySetId, tradeSetId, runId } = {}, { directory = join(ROOT, 'telemetry-trace') } = {}) {
   requireMode(mode);
   if (mode !== 'paper') return { mode, status: 'excluded', reason: 'legacy_global_history_is_paper_only', events: [] };
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? '') || Number.isNaN(Date.parse(`${date}T00:00:00Z`))) throw new TypeError('date must be YYYY-MM-DD');
@@ -417,7 +383,6 @@ export async function readLocalHistory({ mode = 'paper', date, limit = 100, offs
   };
   const nextDay = new Date(Date.parse(`${date}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
   const start = localStart(date), end = localStart(nextDay);
-  const directory = join(ROOT, 'telemetry-trace');
   const availableFiles = (await readdir(directory)).filter((name) => {
     const stamp = /^v5-trace-(\d{13})-/.exec(name)?.[1];
     return name.endsWith('.jsonl') && stamp && Number(stamp) >= start && Number(stamp) < end;

@@ -1,10 +1,11 @@
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir } from 'node:fs/promises';
 import { createAlpacaBroker } from './alpaca.mjs';
 import { createAlpacaProviders } from './providers.mjs';
 import { createRuntime } from './runtime.mjs';
 import { createLedger } from './ledger.mjs';
 import { createContinuity } from './continuity.mjs';
-import { PAPER_ENV, paperAccountPaths } from './paper-account.mjs';
+import { loadCloseoutCredentials, PAPER_ENV, paperAccountPaths } from './paper-account.mjs';
+export { loadCloseoutCredentials } from './paper-account.mjs';
 
 const DEFAULT_ENV = PAPER_ENV;
 const PAPER_URL = 'https://paper-api.alpaca.markets';
@@ -13,11 +14,6 @@ const STREAMS = {
   opra: 'wss://stream.data.alpaca.markets/v1beta1/opra',
   tradeUpdates: 'wss://paper-api.alpaca.markets/stream',
 };
-
-const parseEnv = (text) => Object.fromEntries(text.split(/\r?\n/).flatMap((line) => {
-  const match = line.match(/^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
-  return match ? [[match[1], match[2].replace(/^(['"])(.*)\1$/, '$2')]] : [];
-}));
 
 const safeError = () => 'RUN_FAILED';
 
@@ -35,12 +31,6 @@ export function createCloseoutBroker(options) {
     cancelOrder: blocked('cancel'),
     mutationAttempts: () => [...mutations],
   };
-}
-
-export async function loadCloseoutCredentials(path = DEFAULT_ENV) {
-  const values = parseEnv(await readFile(path, 'utf8'));
-  if (!values.APCA_API_KEY || !values.APCA_SECRET_KEY) throw new Error('required Alpaca credentials are missing');
-  return { key: values.APCA_API_KEY, secret: values.APCA_SECRET_KEY };
 }
 
 const statusName = (value) => {

@@ -272,7 +272,6 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       orderIds: new Set(),
       seenSellExecutions: new Set(),
       quote: null,
-      lastProtectionQuote: null,
       lastSubmittedPrice: null,
       lastSubmittedQty: null,
       inFlight: false
@@ -395,7 +394,6 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       orderIds: new Set(state.orderId ? [state.orderId] : []),
       seenSellExecutions: new Set(),
       quote: null,
-      lastProtectionQuote: null,
       lastSubmittedPrice: null,
       lastSubmittedQty: null,
       inFlight: false
@@ -422,7 +420,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       tradeId,
       executionId: 'recovery', symbol, entryPrice: null, remainingQty: Number(remainingQty), anchorBid: null, profitFloor: null,
       sellLatched: true, logicalSellId: logicalSellId || `v5-sell-${randomUUID()}`, orderId, orderIds: new Set(orderId ? [orderId] : []), seenSellExecutions: new Set(),
-      quote: null, lastProtectionQuote: null, lastSubmittedPrice: null, lastSubmittedQty: null, inFlight: false
+      quote: null, lastSubmittedPrice: null, lastSubmittedQty: null, inFlight: false
     };
     trades.set(trade.tradeId, trade);
     if (orderId) orders.set(orderId, trade);

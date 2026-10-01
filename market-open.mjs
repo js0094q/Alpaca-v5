@@ -5,10 +5,9 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { loadCloseoutCredentials } from './closeout.mjs';
 import { createCalendar } from './providers.mjs';
 import { runPaper } from './paper.mjs';
-import { loadModeAccountPaths, loadPaperAccountPaths } from './paper-account.mjs';
+import { loadCloseoutCredentials, loadModeAccountPaths, loadPaperAccountPaths } from './paper-account.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const STATE = join(ROOT, 'state', 'paper-launch-status');
