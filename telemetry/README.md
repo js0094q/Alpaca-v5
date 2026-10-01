@@ -29,14 +29,14 @@ Retain at most **256 × 64 MiB JSONL (16 GiB)**. Rotation may delete oldest comp
 
 The 16 GiB cap is a planning budget for the next full session: extrapolating September 28's observed pace through 16:00 ET gives roughly 12–13 GiB. It does not guarantee full-day retention at arbitrary volume. Queue saturation and writer failures still drop telemetry without affecting trading.
 
-## Verification artifacts
+## Verification
 
-Run `node telemetry/check.mjs` from the staged checkout beside the preserved `baseline/` directory. After deployment, pass the preserved baseline explicitly:
+Run the telemetry checks from the repository root:
 
 ```sh
-node telemetry/check.mjs --baseline /Users/josephstew/.codex/task-evidence/v5-active-telemetry-2026-09-24/baseline
+node telemetry/decision-parity.check.mjs
+node telemetry/post-exit.check.mjs
+node telemetry/durability.check.mjs
 ```
 
-This uses mocked broker calls and temporary disk output only, never live credentials/APIs or bot processes. It compares original baseline actions/state against disabled, enabled, throwing-observer, saturated and failed-sink runs. Actual signal callbacks drive all representative entries: the 30-second prior range is joined by signal key to selection and entry-set IDs, then to nine lots across grace/loss, trail arm/peak/strict retreat, and run-up/retreat scenarios. Each set has a one-contract partial BUY, repricing of the remainder, then a separate two-contract BUY execution. Each of its three one-contract lots exits through a whole-contract SELL fill; no fractional option contracts are modeled. It also checks URL initialization, primitive bounds, worker exit/stall isolation, output failure, finite stop and bounded rotation.
-
-The check preserves `evidence/representative.jsonl`, `evidence/reconstruction.json` and `evidence/check-report.json` after deleting temporary test output. These are explicitly **mocked replay evidence, not live trades**. The report includes measured emitter and three-lot quote-evaluation p50/p95/p99 and means for baseline, disabled and enabled paths. The synchronous microbenchmark intentionally gives enough queue room to accept all samples; it does not establish live latency, sustained throughput, or zero overhead. Original unchanged bot checks and deployment/live evidence are separate parent responsibilities.
+They use mocked broker calls and temporary disk output only, never live credentials/APIs or bot processes. The former baseline-comparison check (`telemetry/check.mjs`) was removed on 2026-10-01: it compared against a preserved pre-Revision-2 `baseline/` directory whose exit rules no longer match production.
