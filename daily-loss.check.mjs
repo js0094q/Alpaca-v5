@@ -26,8 +26,8 @@ function brokerWith({ positions = [], orders = [], equity = 10_000 } = {}) {
     cancelOrder: async (id) => { const order = currentOrders.get(id); if (order) order.status = 'pending_cancel'; },
   };
 }
-function runtime({ continuity, broker, day = date, dailyLossGuard = true }) {
-  return createRuntime({ broker, continuity, dailyLossGuard, now: () => wall, nowMono: () => mono,
+function runtime({ continuity, broker, day = date, dailyLossGuard = true, ledger, strategyCapital = null }) {
+  return createRuntime({ broker, continuity, dailyLossGuard, ledger, strategyCapital, now: () => wall, nowMono: () => mono,
     calendar: { sessionFor: () => session(day) }, getContracts: async () => [{ symbol, strike: 660 }],
     getQuote: async () => ({ symbol, bid: 1, ask: 1.01, timestamp: new Date(wall).toISOString() }),
   });
@@ -40,9 +40,9 @@ function closedSet(tradeSetId, { lossDollars, closedAt = wall - 1_000 } = {}) {
   return { tradeSetId, date, known: true, entryQty: 10, entryCentQty, exitQty: 10,
     exitCentQty, entryTerminal: true, closedAt };
 }
-async function initialize(continuity, broker, sets = [], dailyLoss = null, day = date) {
+async function initialize(continuity, broker, sets = [], dailyLoss = null, day = date, options = {}) {
   continuity.save([], { pause: null, sets, dailyLoss });
-  const r = runtime({ continuity, broker, day });
+  const r = runtime({ continuity, broker, day, ...options });
   await r.startup();
   return r;
 }
@@ -81,7 +81,7 @@ try {
 // gross do not become losses. A same-day process restart retains the P&L state.
 wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
 const aboveContinuity = createContinuity({ path: stateFile() });
-const aboveState = { date, dayStartEquity: 2_500, cumulativeRealizedGross: -249.99, tripped: false, completedBuyIds: ['prior'] };
+const aboveState = { date, dayStartEquity: 2_500, cumulativeRealizedGross: -249.99, peakRealizedGross: 0, tripped: false, completedBuyIds: ['prior'] };
 const aboveBroker = brokerWith();
 const above = await initialize(aboveContinuity, aboveBroker, [closedSet('zero-result', { lossDollars: 0 }), closedSet('profit-result', { lossDollars: 5 })], aboveState);
 try {
@@ -139,8 +139,71 @@ const nextDayBroker = brokerWith({ equity: 8_000 });
 const nextDay = runtime({ continuity: aboveContinuity, broker: nextDayBroker, day: '2026-09-24' });
 try {
   await nextDay.startup();
-  assert.deepEqual(nextDay.getState().dailyLoss, { date: '2026-09-24', dayStartEquity: 8_000, cumulativeRealizedGross: 0, tripped: false, completedBuyIds: [] });
+  assert.deepEqual(nextDay.getState().dailyLoss, { date: '2026-09-24', dayStartEquity: 8_000, cumulativeRealizedGross: 0, peakRealizedGross: 0, tripped: false, completedBuyIds: [] });
 } finally { nextDay.stop(); }
+
+// The limit trails the day's realized high-water mark by a fixed 10% of
+// capital ($50 of $500): gains never widen it, and a give-back trips it.
+for (const [label, sets, cumulative, peak, tripped] of [
+  ['giveback-below', [['up', 100], ['down', -49.99]], 50.01, 100, false],
+  ['giveback-exact', [['up', 100], ['down', -50]], 50, 100, true],
+  ['from-open', [['down', -50]], -50, 0, true],
+  ['profit-runs', [['up', 100], ['dip', -30], ['up2', 60], ['down', -49.99]], 80.01, 130, false],
+]) {
+  wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+  const r = await initialize(createContinuity({ path: stateFile() }), brokerWith({ equity: 500 }),
+    sets.map(([id, dollars]) => closedSet(`${label}-${id}`, { lossDollars: dollars })),
+    { date, dayStartEquity: 500, cumulativeRealizedGross: 0, tripped: false, completedBuyIds: [] });
+  try {
+    const daily = r.getState().dailyLoss;
+    assert.equal(daily.cumulativeRealizedGross, cumulative, `${label}: cumulative`);
+    assert.equal(daily.peakRealizedGross, peak, `${label}: high-water mark`);
+    assert.equal(daily.tripped, tripped, `${label}: trip`);
+  } finally { r.stop(); }
+}
+
+// Same-day state persisted before the high-water mark existed cannot prove its
+// peak (e.g. +$100 then back to +$25), so further BUYs are blocked for that
+// date and the restored block is written to the ledger.
+wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+const legacyLedger = [];
+const legacyBroker = brokerWith({ equity: 500 });
+const legacy = await initialize(createContinuity({ path: stateFile() }), legacyBroker, [],
+  { date, dayStartEquity: 500, cumulativeRealizedGross: 25, tripped: false, completedBuyIds: ['legacy-prior'] },
+  date, { ledger: (record) => legacyLedger.push(record) });
+try {
+  assert.equal(legacy.getState().dailyLoss.tripped, true, 'legacy same-day state with completed buys blocks entries');
+  const restored = legacyLedger.find((record) => record.event === 'DAILY_LOSS_LIMIT_RESTORED');
+  assert.ok(restored, 'restored trip is written to the ledger');
+  assert.equal(restored.reason, 'legacy_state_without_peak');
+  assert.equal(restored.entriesBlocked, true);
+  await sendBreakout(legacy, 'legacy');
+  assert.equal(legacyBroker.calls.filter((order) => order.side === 'buy').length, 0, 'legacy block suppresses BUY');
+} finally { legacy.stop(); }
+
+// A tripped state restored after a restart writes one ledger line.
+wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+const restoredLedger = [];
+const restoredTrip = await initialize(createContinuity({ path: stateFile() }), brokerWith({ equity: 500 }), [],
+  { date, dayStartEquity: 500, cumulativeRealizedGross: 166, peakRealizedGross: 216, tripped: true, completedBuyIds: ['a'] },
+  date, { ledger: (record) => restoredLedger.push(record) });
+try {
+  const lines = restoredLedger.filter((record) => record.event === 'DAILY_LOSS_LIMIT_RESTORED');
+  assert.equal(lines.length, 1);
+  assert.deepEqual([lines[0].peakRealizedGross, lines[0].cumulativeRealizedGross, lines[0].limit, lines[0].reason], [216, 166, 50, undefined]);
+} finally { restoredTrip.stop(); }
+
+// The budget is frozen at DAY_START: raising capital to $1,000 mid-day keeps
+// today's $50 budget, so a $50 give-back still trips.
+wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+const frozen = await initialize(createContinuity({ path: stateFile() }), brokerWith({ equity: 500 }),
+  [closedSet('frozen-down', { lossDollars: -50 })],
+  { date, dayStartEquity: 500, cumulativeRealizedGross: 100, peakRealizedGross: 100, tripped: false, completedBuyIds: ['frozen-prior'] },
+  date, { strategyCapital: 1_000 });
+try {
+  assert.equal(frozen.getState().dailyLoss.dayStartEquity, 500, 'mid-day capital change does not move the baseline');
+  assert.equal(frozen.getState().dailyLoss.tripped, true, 'frozen $50 budget still trips');
+} finally { frozen.stop(); }
 
 // Fractional baseline equity is rounded at the currency boundary: $10.04 is
 // exactly 10% of $100.40 and must trip rather than miss from binary rounding.

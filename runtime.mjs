@@ -72,10 +72,21 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     // Retain the continuity field name; PAPER uses configured strategy capital.
     const dayStartEquity = Number(strategyCapital ?? equity);
     if (!Number.isFinite(dayStartEquity) || dayStartEquity <= 0) return false;
-    dailyLoss = { date, dayStartEquity, cumulativeRealizedGross: 0, tripped: false, completedBuyIds: [] };
+    dailyLoss = { date, dayStartEquity, cumulativeRealizedGross: 0, peakRealizedGross: 0, tripped: false, completedBuyIds: [] };
     dailyLossStateUnavailable = false;
     if (persist) persistContinuity();
     safeLedger('DAY_START_EQUITY', { date, dayStartEquity, dailyMaxLoss: dayStartEquity * DAILY_MAX_LOSS_RATE });
+    return true;
+  };
+  // Max loss is a fixed share of strategy capital, measured down from the day's
+  // realized high-water mark (never below $0), so gains never widen the limit.
+  const tripDailyLoss = () => {
+    const cumulativeCents = Math.round(dailyLoss.cumulativeRealizedGross * 100);
+    const peakCents = Math.max(0, Math.round(dailyLoss.peakRealizedGross * 100), cumulativeCents);
+    dailyLoss.peakRealizedGross = peakCents / 100;
+    const limitCents = Math.round(Math.round(dailyLoss.dayStartEquity * 100) * DAILY_MAX_LOSS_RATE);
+    if (dailyLoss.tripped || peakCents - cumulativeCents < limitCents) return false;
+    dailyLoss.tripped = true;
     return true;
   };
   const finishSetIfReady = (record) => {
@@ -93,14 +104,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
         // For the fixed SPY option strategy, a cent of premium per share is
         // one dollar per contract (100-share contract multiplier).
         dailyLoss.cumulativeRealizedGross = Math.round((dailyLoss.cumulativeRealizedGross + grossCentQty / 1_000_000) * 100) / 100;
-        const equityCents = Math.round(dailyLoss.dayStartEquity * 100);
-        const cumulativeGrossCents = Math.round(dailyLoss.cumulativeRealizedGross * 100);
-        const threshold = -(equityCents * 100) / 100_000;
-        const crossed = cumulativeGrossCents <= 0 && -cumulativeGrossCents * 1_000 >= equityCents * 100;
-        if (!dailyLoss.tripped && crossed) {
-          dailyLoss.tripped = true;
-          safeLedger('DAILY_MAX_LOSS', { date: dailyLoss.date, dayStartEquity: dailyLoss.dayStartEquity, cumulativeRealizedGross: dailyLoss.cumulativeRealizedGross, threshold });
-        }
+        if (tripDailyLoss()) safeLedger('DAILY_MAX_LOSS', { date: dailyLoss.date, dayStartEquity: dailyLoss.dayStartEquity, cumulativeRealizedGross: dailyLoss.cumulativeRealizedGross, peakRealizedGross: dailyLoss.peakRealizedGross, threshold: dailyLoss.peakRealizedGross - dailyLoss.dayStartEquity * DAILY_MAX_LOSS_RATE });
       }
       if (grossCentQty < 0) {
         const until = record.closedAt + LOSS_PAUSE_MS;
@@ -208,11 +212,18 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     startupEquityDate = currentSession?.date ?? null;
     dailyLossStateUnavailable = dailyLossGuard && ['corrupt', 'incompatible'].includes(saved.status);
     dailyLoss = dailyLossGuard && saved.dailyLoss?.date === currentSession?.date ? { ...saved.dailyLoss, completedBuyIds: [...saved.dailyLoss.completedBuyIds] } : null;
-    if (dailyLoss && strategyCapital !== null) {
-      dailyLoss.dayStartEquity = strategyCapital;
-      const capitalCents = Math.round(strategyCapital * 100);
-      const grossCents = Math.round(dailyLoss.cumulativeRealizedGross * 100);
-      dailyLoss.tripped ||= grossCents <= 0 && -grossCents * 1_000 >= capitalCents * 100;
+    // The day's loss budget stays frozen at its DAY_START capital; a capital
+    // change takes effect on the next trading date.
+    if (dailyLoss) {
+      // Same-day state written before the high-water mark existed cannot prove
+      // its peak, so block further BUYs for that date rather than guess one.
+      const legacy = dailyLoss.peakRealizedGross === undefined;
+      if (legacy) {
+        dailyLoss.peakRealizedGross = Math.max(0, dailyLoss.cumulativeRealizedGross);
+        if (dailyLoss.completedBuyIds.length) dailyLoss.tripped = true;
+      }
+      tripDailyLoss();
+      if (dailyLoss.tripped) safeLedger('DAILY_LOSS_LIMIT_RESTORED', { date: dailyLoss.date, peakRealizedGross: dailyLoss.peakRealizedGross, cumulativeRealizedGross: dailyLoss.cumulativeRealizedGross, limit: dailyLoss.dayStartEquity * DAILY_MAX_LOSS_RATE, entriesBlocked: true, ...(legacy && dailyLoss.completedBuyIds.length ? { reason: 'legacy_state_without_peak' } : {}) });
     }
     // Establish the date baseline before startup settles any persisted,
     // broker-confirmed completed BUY accounting records below.

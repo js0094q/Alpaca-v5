@@ -178,8 +178,8 @@ for (const [label, loss, expected] of [['below', -49.99, false], ['exact', -50, 
   } finally { runtime.stop(); }
 }
 
-// Restored state uses the configured $500 strategy baseline while preserving
-// the day's existing realized P&L, dedup IDs, and sticky trip.
+// Restored state keeps the budget frozen at its DAY_START baseline while
+// preserving the day's existing realized P&L, dedup IDs, and sticky trip.
 {
   const continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-restore-')), 'state.json') });
   const prior = { date, dayStartEquity: 9_744.81, cumulativeRealizedGross: -12.5, tripped: true, completedBuyIds: ['buy-a', 'buy-b'] };
@@ -187,7 +187,7 @@ for (const [label, loss, expected] of [['below', -49.99, false], ['exact', -50, 
   const runtime = runtimeHarness({ continuity, broker: brokerState({ equity: 9_744.81 }) });
   try {
     await runtime.startup();
-    assert.deepEqual(runtime.getState().dailyLoss, { ...prior, dayStartEquity: 500 }, 'restored daily-loss state retains accounting and uses configured baseline');
+    assert.deepEqual(runtime.getState().dailyLoss, { ...prior, peakRealizedGross: 0 }, 'restored daily-loss state retains accounting and its DAY_START baseline');
   } finally { runtime.stop(); }
 }
 
@@ -201,7 +201,7 @@ for (const [label, loss, expected] of [['below', -49.99, false], ['exact', -50, 
   try {
     await runtime.startup();
     assert.deepEqual(runtime.getState().dailyLoss, { date: tomorrow, dayStartEquity: 500,
-      cumulativeRealizedGross: 0, tripped: false, completedBuyIds: [] });
+      cumulativeRealizedGross: 0, peakRealizedGross: 0, tripped: false, completedBuyIds: [] });
   } finally { runtime.stop(); }
 }
 

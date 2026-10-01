@@ -43,7 +43,7 @@ export function createContinuity({ path = 'state/v5-active-state.json', fs = {} 
   const validDailyLoss = (value) => value === null || (value && typeof value === 'object' &&
     typeof value.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.date) &&
     validNumber(value.dayStartEquity) && value.dayStartEquity > 0 &&
-    validNumber(value.cumulativeRealizedGross) && typeof value.tripped === 'boolean' &&
+    validNumber(value.cumulativeRealizedGross) && (value.peakRealizedGross === undefined || (validNumber(value.peakRealizedGross) && value.peakRealizedGross >= 0)) && typeof value.tripped === 'boolean' &&
     Array.isArray(value.completedBuyIds) && value.completedBuyIds.every((id) => typeof id === 'string' && id.length > 0) &&
     new Set(value.completedBuyIds).size === value.completedBuyIds.length);
   const validSet = (set) => set && typeof set === 'object' && typeof set.tradeSetId === 'string' && set.tradeSetId &&
