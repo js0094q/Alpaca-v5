@@ -1,0 +1,12 @@
+[Unit]
+Description=Start the V5 LIVE session on each US market weekday
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:30:00 America/New_York
+AccuracySec=1s
+Persistent=no
+Unit=v5-live.service
+
+[Install]
+# Deliberately not enabled by installation; enabling requires an explicit later cutover.
+WantedBy=timers.target

@@ -1,0 +1,45 @@
+[Unit]
+Description=V5 LIVE trading session
+Documentation=file:/opt/v5/current/README.md
+Wants=network-online.target
+After=network-online.target
+ConditionPathIsDirectory=/opt/v5/current
+ConditionPathIsDirectory=/var/lib/v5bot/state
+
+[Service]
+Type=oneshot
+User=v5bot
+Group=v5bot
+WorkingDirectory=/opt/v5/current
+Environment=HOME=/var/lib/v5bot
+Environment=TZ=America/New_York
+ExecStart=/usr/bin/node /opt/v5/current/deploy/linux/run-live.mjs
+Restart=no
+KillSignal=SIGTERM
+TimeoutStartSec=infinity
+TimeoutStopSec=infinity
+UMask=0077
+StateDirectory=v5bot
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectProc=invisible
+ProcSubset=pid
+ReadWritePaths=/var/lib/v5bot
+
+[Install]
+# Deliberately not enabled by the deployment installer. The timer is the only scheduler.
