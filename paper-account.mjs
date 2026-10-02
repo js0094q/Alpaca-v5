@@ -22,7 +22,7 @@ export function paperAccountPaths(account) {
   const accountHash = createHash('sha256').update(account.id).digest('hex');
   const directory = join(ROOT, 'state', 'paper-accounts', accountHash);
   return { accountHash, directory, continuity: join(directory, 'v5-active-state.json'),
-    ledger: join(directory, 'paper-ledger.log'), closeoutLedger: join(directory, 'closeout-ledger.log'),
+    ledger: join(directory, 'paper-ledger.log'),
     marketOpen: join(directory, 'market-open') };
 }
 
@@ -33,7 +33,7 @@ export function modeAccountPaths(mode, account) {
   const accountHash = createHash('sha256').update(account.id).digest('hex');
   const directory = join(ROOT, 'state', 'live-accounts', accountHash);
   return { accountHash, directory, continuity: join(directory, 'v5-active-state.json'),
-    ledger: join(directory, 'live-ledger.log'), closeoutLedger: join(directory, 'live-ledger.log'),
+    ledger: join(directory, 'live-ledger.log'),
     marketOpen: join(directory, 'market-open') };
 }
 

@@ -1,25 +1,10 @@
-import { observe } from './telemetry/trace.mjs';
-const PAPER_URL = 'https://paper-api.alpaca.markets';
 const json = async (response) => { const body = await response.text(); if (!response.ok) { let details; try { details = JSON.parse(body); } catch {} const error = new Error(details?.message ?? body ?? 'Alpaca request failed'); error.httpStatus = response.status; error.code = details?.code; throw error; } return body ? JSON.parse(body) : null; };
 
-export function createAlpacaBroker({ key, secret, baseUrl, fetchImpl = fetch, telemetry }) {
+export function createAlpacaBroker({ key, secret, baseUrl, fetchImpl = fetch }) {
   if (!key || !secret) throw new TypeError('Alpaca credentials are required');
   if (!['https://paper-api.alpaca.markets', 'https://api.alpaca.markets'].includes(baseUrl)) throw new Error('Unsupported Alpaca API URL');
-  let requestSequence = 0;
   const request = (path, options = {}) => {
-    const requestId = ++requestSequence;
-    observe(telemetry, 'broker_api_request', { requestId, path, method: options.method ?? 'GET' });
-    let pending;
-    try { pending = fetchImpl(`${baseUrl}${path}`, { ...options, headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, 'content-type': 'application/json', ...(options.headers ?? {}) } }).then(json); } catch (error) {
-      observe(telemetry, 'broker_api_error', { requestId, path, errorName: error?.name, httpStatus: error?.httpStatus });
-      throw error;
-    }
-    void pending.then((result) => {
-      observe(telemetry, 'broker_api_response', { requestId, path, orderId: result?.id, status: result?.status });
-    }, (error) => {
-      observe(telemetry, 'broker_api_error', { requestId, path, errorName: error?.name, httpStatus: error?.httpStatus });
-    });
-    return pending;
+    return fetchImpl(`${baseUrl}${path}`, { ...options, headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, 'content-type': 'application/json', ...(options.headers ?? {}) } }).then(json);
   };
   return {
     submitOrder: (o) => request('/v2/orders', { method: 'POST', body: JSON.stringify({ symbol: o.symbol, qty: o.qty, side: o.side, type: 'limit', limit_price: o.limitPrice, time_in_force: 'day', client_order_id: o.clientOrderId, ...(o.positionIntent ? { position_intent: o.positionIntent } : {}) }) }).then((x) => ({ id: x.id, status: x.status, clientOrderId: x.client_order_id })),

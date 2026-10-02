@@ -13,7 +13,6 @@ async function checkFailure(kind) {
   let wall = sessionOpen;
   let attempts = 0;
   let submissions = 0;
-  const traces = [];
   const tempDir = mkdtempSync(join(tmpdir(), 'v5-selection-failure-'));
   const unhandled = [];
   const listener = (error) => unhandled.push(error);
@@ -27,7 +26,6 @@ async function checkFailure(kind) {
     now: () => wall,
     nowMono: () => wall - sessionOpen,
     continuity: createContinuity({ path: join(tempDir, 'state.json') }),
-    telemetry: (event, fields) => traces.push({ event, fields }),
     getContracts: async () => {
       attempts += 1;
       if (kind === 'contracts' && attempts === 1) throw new Error('contracts unavailable');
@@ -58,7 +56,6 @@ async function checkFailure(kind) {
     assert.equal(runtime.getState().entry.pausedReason, 'SELECTION_FAILED', `${kind}: selection failure is recorded`);
     assert.equal(runtime.getState().entry.state, 'IDLE', `${kind}: entry returns to IDLE`);
     assert.equal(runtime.getState().state, 'FLAT', `${kind}: runtime returns to FLAT`);
-    assert(traces.some(({ event, fields }) => event === 'entry_state' && fields.reason === 'SELECTION_FAILED' && fields.state === 'IDLE'), `${kind}: existing entry_state telemetry records selection failure`);
     assert.equal(submissions, 0, `${kind}: no order is submitted on selection failure`);
     assert.deepEqual(unhandled, [], `${kind}: rejection is handled`);
 

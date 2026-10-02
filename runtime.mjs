@@ -1,4 +1,3 @@
-import { observe } from './telemetry/trace.mjs';
 import { createSignal } from './signal.mjs';
 import { createEntry } from './entry.mjs';
 import { createPositions } from './positions.mjs';
@@ -18,7 +17,7 @@ const entryCutoffMinutes = (value) => {
   return hour * 60 + minute;
 };
 
-export function createRuntime({ broker, getContracts, getQuote, calendar, now = () => Date.now(), nowMono = () => performance.now(), ledger = () => {}, continuity = createContinuity(), dailyLossGuard = false, strategyCapital = null, entryQuantity = 3, liquidateAt = null, telemetry, entryCutoffMinuteET = 15 * 60 + 30, stopAtMs = null }) {
+export function createRuntime({ broker, getContracts, getQuote, calendar, now = () => Date.now(), nowMono = () => performance.now(), ledger = () => {}, continuity = createContinuity(), dailyLossGuard = false, strategyCapital = null, entryQuantity = 3, liquidateAt = null, entryCutoffMinuteET = 15 * 60 + 30, stopAtMs = null }) {
   if (!broker || !getContracts || !getQuote || !calendar) throw new TypeError('broker, contract, quote, and calendar inputs are required');
   if (stopAtMs !== null && !Number.isFinite(stopAtMs)) throw new TypeError('stopAtMs must be a finite timestamp');
   if (liquidateAt !== null && !Number.isFinite(liquidateAt)) throw new TypeError('liquidateAt must be a finite timestamp');
@@ -46,11 +45,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
   let nextOwnershipScanAt = 0;
   const cancelingBuys = new Set();
   const executionIssues = [];
-  let traceLedgerEntries = 0, traceLedgerExits = 0;
   const safeLedger = (event, data = {}) => {
-    if (event === 'FILL') traceLedgerEntries++;
-    if (event === 'EXIT') traceLedgerExits += Number(data.qty) || 0;
-    observe(telemetry, 'ledger_dispatch', { ledgerEvent: event, tradeId: data.tradeId, executionId: data.executionId, symbol: data.symbol, quantity: data.qty, price: data.price ?? data.entryPrice, ledgerDispatchEntries: traceLedgerEntries, ledgerDispatchExits: traceLedgerExits });
     try {
       const result = ledger({ timestamp: new Date(now()).toISOString(), event, ...(ledgerDate ? { date: ledgerDate, ledgerId: `v5-day-${ledgerDate}` } : {}), ...data });
       Promise.resolve(result).catch(() => {});
@@ -63,7 +58,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     trade.tradeId, trade.symbol, trade.remainingQty, trade.profitFloor, trade.sellLatched,
     trade.logicalSellId, trade.orderId, trade.inFlight,
   ]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
-  const setState = (next, data) => { if (executionIssues.length) next = 'BLOCKED_EXECUTION'; if (state !== next) { observe(telemetry, 'runtime_state', { priorState: state, state: next }); state = next; safeLedger(next, data); } };
+  const setState = (next, data) => { if (executionIssues.length) next = 'BLOCKED_EXECUTION'; if (state !== next) { state = next; safeLedger(next, data); } };
   const entryActive = () => Boolean(entryState.active);
   const cents = (value) => Number.isFinite(Number(value)) ? Math.round(Number(value) * 100) : null;
   const persistContinuity = () => continuity.save(trades(), { pause: activePause, sets: [...setAccounting.values()], ...(dailyLossGuard && dailyLoss ? { dailyLoss } : {}) });
@@ -165,7 +160,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     safeLedger('DAY_START', { date: session.date, ledgerId: `v5-day-${session.date}`, ...(dailyLoss?.date === session.date ? { dayStartEquity: dailyLoss.dayStartEquity, dailyMaxLoss: dailyLoss.dayStartEquity * DAILY_MAX_LOSS_RATE } : {}) });
   };
 
-  const positions = createPositions({ broker, telemetry, onExit, onExecutionIssue: (issue) => {
+  const positions = createPositions({ broker, onExit, onExecutionIssue: (issue) => {
     if (issue.resolved) {
       const index = executionIssues.findIndex((prior) => prior.reason === issue.reason && prior.orderId === issue.orderId && prior.tradeId === issue.tradeId);
       if (index >= 0) executionIssues.splice(index, 1);
@@ -177,7 +172,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     }
   }, onState: (s) => { if (!hydrating) continuity.save(positions.getTrades()); if (s?.state) setState(s.state, s); }, now, nowMono });
   let entry;
-  entry = createEntry({ broker, telemetry, quantity: entryQuantity, strategyCapital, canSubmit: () => { const current = now(), session = calendar.sessionFor(current); return canEnterDailyLoss() && (stopAtMs === null || current < stopAtMs) && session?.status === 'open' && session.date === sessionDate && entryCutoffMinutes(current) < buyCutoffMinuteET && (!session.cutoff || current < Date.parse(session.cutoff)); }, getContracts, getQuote, nowMono, onFill: (fill) => {
+  entry = createEntry({ broker, quantity: entryQuantity, strategyCapital, canSubmit: () => { const current = now(), session = calendar.sessionFor(current); return canEnterDailyLoss() && (stopAtMs === null || current < stopAtMs) && session?.status === 'open' && session.date === sessionDate && entryCutoffMinutes(current) < buyCutoffMinuteET && (!session.cutoff || current < Date.parse(session.cutoff)); }, getContracts, getQuote, nowMono, onFill: (fill) => {
     safeLedger('FILL', fill);
     const priceCents = cents(fill.entryPrice);
     if (fill.tradeSetId && priceCents !== null) {
@@ -193,7 +188,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     positions.onFill(fill);
     persistContinuity();
   }, onState: (s) => { entryState = s; recordEntryState(); const status = s?.status ?? s?.state; if (['IDLE', 'DONE', 'canceled', 'rejected', 'expired'].includes(status) && !hasOwnership() && cancelingBuys.size === 0) { if (state !== 'COOLDOWN') { entry.ready?.(); setState('FLAT'); } } scheduleDeadline(); } });
-  const signal = createSignal({ onBreakout, telemetry, entryCutoffMinuteET });
+  const signal = createSignal({ onBreakout, entryCutoffMinuteET });
   const sip = createSipProcessor({ onTrade: (trade, receivedAt) => signal.onTrade(trade, receivedAt), onCorrection: (change, receivedAt) => signal.onCorrection(change, receivedAt), onCancel: (change, receivedAt) => signal.onCancel(change, receivedAt) });
 
   async function startup() {
@@ -320,7 +315,6 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
         for (const trade of local) {
           positions.clearAlreadyClosed(trade.tradeId);
           safeLedger('ALREADY_CLOSED', { tradeId: trade.tradeId, symbol, qty: trade.remainingQty, reason: 'broker_current_flat' });
-          observe(telemetry, 'ownership_already_closed', { tradeId: trade.tradeId, symbol, quantity: trade.remainingQty, reason: 'broker_current_flat' });
         }
         continuity.save(trades());
         if (!hasOwnership()) {
@@ -347,7 +341,6 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
   function onRawTrade(raw) {
     const receivedAt = now();
     const result = sip.onRawTrade(raw, receivedAt);
-    if (result?.accepted) observe(telemetry, 'sip_trade_accepted', { sourceTimestamp: raw.timestamp ?? raw.raw?.t ?? raw.t, receivedAt, tradeId: raw.tradeId ?? raw.raw?.i ?? raw.i });
     return result;
   }
   function onMarketDataReconnect() {
@@ -364,7 +357,6 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
   function onQuote(quote) { positions.onQuote(quote); }
 
   function onOrderUpdate(update) {
-    observe(telemetry, 'trade_update_received', { orderId: update.orderId, clientOrderId: update.clientOrderId, symbol: update.symbol, side: update.side, orderEvent: update.event, executionId: update.executionId, fillQty: update.fillQty, fillPrice: update.fillPrice, brokerTimestamp: update.timestamp, replacedBy: update.replacedBy });
     if (cancelingBuys.has(update.orderId) && ['canceled', 'rejected', 'expired'].includes(update.event)) cancelingBuys.delete(update.orderId);
     entry.onOrderUpdate(update); positions.onOrderUpdate(update); recordEntryState();
     const fillSet = update.clientOrderId ? setAccounting.get(update.clientOrderId) : null;
@@ -429,20 +421,6 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     getState: () => {
       const entrySnapshot = entry.getState();
       return { state, sessionDate, ledgerDate, cooldownUntil, lossPauseUntil: activePause?.until ?? null, warmupUntil, blockers: [...executionIssues], ...(dailyLossGuard ? { dailyLoss: dailyLoss ? { ...dailyLoss, completedBuyIds: [...dailyLoss.completedBuyIds] } : null } : {}), entry: entrySnapshot };
-    },
-    observeDrain(snapshot, final, ledgerWrites = {}) {
-      try {
-      const local = positions.getTrades();
-      const brokerPositions = (snapshot.positions ?? []).filter((p) => isSpyOption(p.symbol));
-      const localQty = local.reduce((n, t) => n + Math.max(0, Number(t.remainingQty) || 0), 0);
-      // Gross exposure includes excess SELL shorts; opposite signs must not cancel.
-      const brokerQty = brokerPositions.reduce((n, p) => n + Math.abs(Number(p.qty ?? p.quantity) || 0), 0);
-      observe(telemetry, 'drain_reconciliation', { final, localQty, brokerQty, ownershipDelta: brokerQty - localQty, ledgerDispatchEntries: traceLedgerEntries, ledgerDispatchExits: traceLedgerExits, ledgerDispatchUnclosedQty: traceLedgerEntries - traceLedgerExits, openOrders: snapshot.orders?.length ?? 0, ledgerPersistedEntries: ledgerWrites.persistedEntries, ledgerPersistedExits: ledgerWrites.persistedExits, ledgerWritesPending: ledgerWrites.pending, ledgerWriteFailures: ledgerWrites.failures, persistedReconciliation: 'observed_only_not_flushed' });
-      if (final) {
-        for (const t of local) if (t.remainingQty > 0) observe(telemetry, 'final_local_ownership', { tradeId: t.tradeId, symbol: t.symbol, remainingQty: t.remainingQty, entryPrice: t.entryPrice, sellLatched: t.sellLatched, orderId: t.orderId });
-        for (const p of brokerPositions) observe(telemetry, 'final_broker_ownership', { symbol: p.symbol, quantity: Number(p.qty ?? p.quantity) });
-      }
-      } catch {}
     },
     nextDeadline: () => entry.nextDeadline(),
     stopEntries: () => { stopAtMs = Math.min(stopAtMs ?? Infinity, now()); tick(); }

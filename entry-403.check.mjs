@@ -87,21 +87,17 @@ for (const [httpStatus, code, message, expected] of [
   [429, 42910000, 'rate limit', 'UNKNOWN_OUTCOME'],
   [503, 50310000, 'unavailable', 'UNKNOWN_OUTCOME'],
 ]) {
-  const events = [];
-  const telemetry = (event, fields) => events.push({ event, fields });
-  const broker = createAlpacaBroker({ key: 'test', secret: 'test', telemetry, fetchImpl: async () => new Response(JSON.stringify({ code, message }), { status: httpStatus }) });
+  const broker = createAlpacaBroker({ key: 'test', secret: 'test', fetchImpl: async () => new Response(JSON.stringify({ code, message }), { status: httpStatus }) });
   await assert.rejects(broker.submitOrder({ symbol: f.symbol, qty: 3, side: 'buy', limitPrice: f.limitPrice, clientOrderId: 'test' }), (error) => {
     assert.equal(error.httpStatus, httpStatus);
     assert.equal(error.code, code);
     assert.equal(error.message, message);
     return true;
   });
-  const entry = createEntry({ ...inputs, broker, telemetry });
+  const entry = createEntry({ ...inputs, broker });
   await entry.onBreakout(breakout);
   assert.equal(entry.getState().orderStatus, expected, `${httpStatus} ${message}`);
   assert.equal(entry.getState().state, expected === 'rejected' ? 'DONE' : 'SUBMITTING');
   assert.equal(entry.getState().orderId, null);
-  const apiError = events.find((row) => row.event === 'buy_api_error').fields;
-  assert.deepEqual([apiError.httpStatus, apiError.code, apiError.message], [httpStatus, code, message]);
 }
-console.log('BUY rejection regressions passed (traces, 4xx, ambiguous errors, broker event races).');
+console.log('BUY rejection behavior checks passed (4xx, ambiguous errors, broker event races).');

@@ -120,8 +120,7 @@ const reconnectRuntime = createRuntime({
 });
 await reconnectRuntime.startup();
 const sipStream = 'wss://stream.data.alpaca.markets/v2/sip';
-const statusEvents = [];
-const status = (stream, state, attempt) => handleProviderStatus(reconnectRuntime, (event, fields) => statusEvents.push({ event, fields }), { stream, status: state, attempt });
+const status = (stream, state) => handleProviderStatus(reconnectRuntime, { stream, status: state });
 const initialWarmup = reconnectRuntime.getState().warmupUntil;
 for (const stream of ['wss://stream.data.alpaca.markets/v1beta1/opra', 'wss://paper-api.alpaca.markets/stream']) {
   status(stream, 'disconnected'); status(stream, 'reconnected', 1);
@@ -132,9 +131,8 @@ assert.equal(reconnectRuntime.getState().warmupUntil, wall + 30_000);
 wall += 1_000;
 status(sipStream, 'authenticated'); status(sipStream, 'subscription_confirmed');
 assert.equal(reconnectRuntime.getState().warmupUntil, wall + 29_000, 'auth and subscription ACKs do not reset warmup');
-status(sipStream, 'reconnected', 1);
+status(sipStream, 'reconnected');
 assert.equal(reconnectRuntime.getState().warmupUntil, wall + 30_000, 'SIP recovery starts a fresh warmup');
-assert.equal(statusEvents.at(-1).fields.attempt, 1, 'retry attempt stays primitive in status telemetry');
 wall += 29_999;
 reconnectRuntime.onTrade({ timestamp: new Date(wall).toISOString(), price: 659 });
 reconnectRuntime.onTrade({ timestamp: new Date(wall + 1).toISOString(), price: 662 });

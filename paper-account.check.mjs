@@ -2,8 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PAPER_ENV, paperAccountPaths, loadPaperAccountPaths } from './paper-account.mjs';
-import { loadCloseoutCredentials } from './closeout.mjs';
+import { PAPER_ENV, paperAccountPaths, loadPaperAccountPaths, loadCloseoutCredentials } from './paper-account.mjs';
 import { launchMarketOpen } from './market-open.mjs';
 import { createContinuity } from './continuity.mjs';
 
@@ -20,7 +19,7 @@ try {
   assert.deepEqual(first, paperAccountPaths({ id: 'account-one' }));
   assert.notEqual(first.directory, second.directory);
   assert.match(first.accountHash, /^[a-f0-9]{64}$/);
-  for (const field of ['continuity', 'ledger', 'closeoutLedger', 'marketOpen']) assert.ok(first[field].startsWith(`${first.directory}/`));
+  for (const field of ['continuity', 'ledger', 'marketOpen']) assert.ok(first[field].startsWith(`${first.directory}/`));
   assert.throws(() => paperAccountPaths({}), /MISSING/);
   let requests = 0;
   const fetched = await loadPaperAccountPaths({ key: 'test-key', secret: 'test-secret' }, async (url, options) => {

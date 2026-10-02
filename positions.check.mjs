@@ -2,9 +2,8 @@ import assert from 'node:assert/strict';
 import { createPositions } from './positions.mjs';
 export async function demo() {
   const calls = [], exits = [];
-  const positionEvents = [];
   const broker = { async submitOrder(r) { calls.push(['submit', r]); return { id: `s${calls.length}`, status: 'accepted' }; }, async replaceOrder(id, r) { calls.push(['replace', id, r]); return { id: `${id}r`, status: 'accepted' }; }, async cancelOrder() {} };
-  const p = createPositions({ broker, onExit: (e) => exits.push(e), telemetry: (event, fields) => positionEvents.push({ event, fields }) });
+  const p = createPositions({ broker, onExit: (e) => exits.push(e) });
   for (const id of ['a', 'b', 'c']) p.onFill({ executionId: 'buy-1', tradeId: id, symbol: 'SPY', entryPrice: 1, timestamp: 1 });
   p.onQuote({ symbol: 'SPY', bid: 1, ask: 1.01, timestamp: 10_001 }); // shared T+10 anchor
   assert.deepEqual(p.getTrades().map((t) => t.anchorBid), [1, 1, 1]);
@@ -24,7 +23,6 @@ export async function demo() {
   assert.equal(p.getTrades().find((t) => t.tradeId === 'e').sellLatched, true);
   p.onFill({ executionId: 'buy-1', tradeId: 'f', symbol: 'QQQ', entryPrice: 1, timestamp: 8 });
   assert.equal(p.getTrades().find((t) => t.tradeId === 'f').sellLatched, true);
-  assert.deepEqual(positionEvents.filter(({ event, fields }) => event === 'position_quote_accepted' && fields.tradeId === 'f').map(({ fields }) => [fields.source, fields.sourceTimestamp, fields.quoteTimestamp]), [['cached_at_fill', 10_009, 10_009]]);
   await Promise.resolve();
   const before = calls.length; p.onQuote({ symbol: 'SPY', bid: 1.10, ask: 1.11, timestamp: 10_007 }); await Promise.resolve(); assert.equal(calls.length, before);
   p.onFill({ executionId: 'buy-1', tradeId: 'd', symbol: 'SPY', entryPrice: 1, timestamp: -9_999 }); p.onQuote({ symbol: 'SPY', bid: 1.20, ask: 1.21, timestamp: 10_010 }); p.onQuote({ symbol: 'SPY', bid: 1.15, ask: 1.16, timestamp: 10_011 });
@@ -60,16 +58,13 @@ export async function demo() {
   assert.equal(restored.getTrades()[0].sellLatched, true);
 
   let exactNow = 19_999;
-  const exactEvents = [];
-  const exact = createPositions({ broker, now: () => exactNow, telemetry: (event, fields) => exactEvents.push({ event, ...fields }) });
+  const exact = createPositions({ broker, now: () => exactNow });
   exact.onFill({ executionId: 'buy-exact', tradeId: 'x1', symbol: 'EXACT', entryPrice: 1, timestamp: 10_000 });
   exact.onQuote({ symbol: 'EXACT', bid: 0.89, ask: 0.90, timestamp: 20_000 }); // source time cannot bypass receipt grace
   assert.equal(exact.getTrades()[0].sellLatched, false);
-  assert.deepEqual([exactEvents.at(-1).action, exactEvents.at(-1).graceActive, exactEvents.at(-1).graceEndsAt], ['LOSS_SUPPRESSED_BY_GRACE', true, 20_000]);
   exactNow = 20_000;
   exact.onQuote({ symbol: 'EXACT', bid: 0.89, ask: 0.90, timestamp: 10_000 }); // stale source time does not block an accepted T+10 bid
   assert.equal(exact.getTrades()[0].sellLatched, true);
-  assert.deepEqual([exactEvents.at(-1).action, exactEvents.at(-1).graceActive, exactEvents.at(-1).graceEndsAt], ['LOSS_LATCH', false, 20_000]);
 
   let profitNow = Date.parse('2026-09-22T15:00:05Z');
   const profit = createPositions({ broker, now: () => profitNow });
@@ -113,34 +108,28 @@ export async function demo() {
     ['above-entry', 1.20, 1.20, 1.22]
   ]) {
     let now = 20_000;
-    const events = [];
-    const referenceLot = createPositions({ broker, now: () => now, telemetry: (event, fields) => events.push({ event, ...fields }) });
+    const referenceLot = createPositions({ broker, now: () => now });
     referenceLot.onFill({ executionId: `buy-${tradeId}`, tradeId, symbol: 'REFERENCE', entryPrice: 1, timestamp: 10_000 });
     referenceLot.onQuote({ symbol: 'REFERENCE', bid: rawAnchor, ask: rawAnchor + 0.01, timestamp: `raw-${tradeId}` });
     let trade = referenceLot.getTrades()[0];
     assert.deepEqual([trade.anchorBid, trade.sellLatched], [rawAnchor, false], `${tradeId}: raw anchor remains visible`);
-    const anchorDecision = events.findLast((event) => event.event === 'lot_decision');
-    assert.deepEqual([anchorDecision.lossThreshold, anchorDecision.trailArmThreshold], [reference * 0.9, arm], `${tradeId}: anchor telemetry uses effective reference`);
 
     if (tradeId === 'below-entry') {
       now += 1;
       referenceLot.onQuote({ symbol: 'REFERENCE', bid: 1.00, ask: 1.01, timestamp: 'raw-anchor-plus-5c' });
-      assert.deepEqual([referenceLot.getTrades()[0].profitFloor, events.findLast((event) => event.event === 'lot_decision').action], [null, 'HOLD'], 'raw anchor cannot arm below effective reference +2c');
+      assert.equal(referenceLot.getTrades()[0].profitFloor, null, 'raw anchor cannot arm below effective reference +2c');
     }
 
     now += 1;
     referenceLot.onQuote({ symbol: 'REFERENCE', bid: arm, ask: arm + 0.01, timestamp: 'arm' });
     trade = referenceLot.getTrades()[0];
     assert.deepEqual([trade.anchorBid, trade.profitFloor, trade.sellLatched], [rawAnchor, arm - 0.04, false], `${tradeId}: arm uses actual bid and preserves raw anchor`);
-    assert.deepEqual([events.findLast((event) => event.event === 'lot_decision').trailArmThreshold, events.findLast((event) => event.event === 'lot_decision').phase], [arm, 'TRAILING']);
   }
 
-  const anchorLossEvents = [];
-  const anchorLoss = createPositions({ broker, telemetry: (event, fields) => anchorLossEvents.push({ event, ...fields }) });
+  const anchorLoss = createPositions({ broker });
   anchorLoss.onFill({ executionId: 'buy-anchor-loss', tradeId: 'anchor-loss', symbol: 'ANCHOR-LOSS', entryPrice: 1, timestamp: 1_000 });
   anchorLoss.onQuote({ symbol: 'ANCHOR-LOSS', bid: 0.90, ask: 0.91, timestamp: 'anchor-loss-equality' });
   assert.deepEqual([anchorLoss.getTrades()[0].anchorBid, anchorLoss.getTrades()[0].sellLatched], [0.90, true], 'loss equality is evaluated on the anchor quote');
-  assert.deepEqual([anchorLossEvents.findLast((event) => event.event === 'sell_latch').anchorBid, anchorLossEvents.findLast((event) => event.event === 'sell_latch').threshold], [0.90, 0.90]);
 
   let shiftedNow = 10_999;
   const shifted = createPositions({ broker, now: () => shiftedNow });
@@ -184,39 +173,28 @@ export async function demo() {
   assert.deepEqual([legacyRestore.getTrades()[0].anchorBid, legacyRestore.getTrades()[0].profitFloor], [1, null]);
 
   for (const steps of [
-    [[1.02, 'TRAIL_ARM', 'TRAILING'], [1.01, 'HOLD', 'TRAILING'], [0.97, 'PROFIT_FLOOR_LATCH', 'SELL_LATCHED']],
-    [[1.06, 'TRAIL_ARM', 'TRAILING'], [1.15, 'HOLD', 'TRAILING'], [1.11, 'HOLD', 'TRAILING'], [1.10, 'PROFIT_FLOOR_LATCH', 'SELL_LATCHED']],
-    [[1.50, 'TRAIL_ARM', 'TRAILING'], [1.40, 'PROFIT_FLOOR_LATCH', 'SELL_LATCHED']]
+    [[1.02, false], [1.01, false], [0.97, true]],
+    [[1.06, false], [1.15, false], [1.11, false], [1.10, true]],
+    [[1.50, false], [1.40, true]]
   ]) {
-    const events = [], orders = [];
+    const orders = [];
     const ladder = createPositions({
       broker: {
         async submitOrder(order) { orders.push(order); return { id: 'ladder-sell', status: 'accepted' }; },
         async replaceOrder(id, order) { orders.push({ operation: 'replace', ...order }); return { id, status: 'accepted' }; }
       },
-      telemetry: (event, fields) => events.push({ event, ...fields }),
       now: () => 10_001
     });
     ladder.onFill({ executionId: 'ladder-buy', tradeId: 'ladder-lot', symbol: 'LADDER', entryPrice: 1, timestamp: 1 });
     ladder.onQuote({ symbol: 'LADDER', bid: 1, ask: 1.01, timestamp: 10_001 });
-    let priorPhase = 'HOLD';
-    for (const [index, [bid, action, phase]] of steps.entries()) {
-      const start = events.length;
+    for (const [index, [bid, shouldLatch]] of steps.entries()) {
       ladder.onQuote({ symbol: 'LADDER', bid, ask: bid + 0.01, timestamp: index + 10_002 });
-      const decisions = events.slice(start).filter((event) => event.event === 'lot_decision');
-      assert.equal(decisions.length, 1);
-      assert.deepEqual([decisions[0].action, decisions[0].priorPhase, decisions[0].phase], [action, priorPhase, phase]);
-      const latched = phase === 'SELL_LATCHED';
-      assert.equal(ladder.getTrades()[0].sellLatched, latched);
-      assert.equal(orders.length, latched ? 1 : 0, `${action} at ${bid}: only a latch submits a SELL`);
-      const latches = events.slice(start).filter((event) => event.event === 'sell_latch');
-      assert.equal(latches.length, latched ? 1 : 0);
-      if (latched) {
-        assert.deepEqual([latches[0].reason, latches[0].priorPhase, latches[0].phase], ['profit_floor', priorPhase, phase]);
+      assert.equal(ladder.getTrades()[0].sellLatched, shouldLatch, `bid ${bid}: latch state follows the current floor`);
+      assert.equal(orders.length, shouldLatch ? 1 : 0, `bid ${bid}: only a latch submits a SELL`);
+      if (shouldLatch) {
         assert.equal(orders[0].side, 'sell');
         assert.equal(orders[0].limitPrice, bid);
       }
-      priorPhase = phase;
     }
     await Promise.resolve();
     assert.equal(orders.length, 1);

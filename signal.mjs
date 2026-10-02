@@ -1,4 +1,3 @@
-import { observe } from './telemetry/trace.mjs';
 const WINDOW_MS = 30_000;
 const WARMUP_MS = 30_000;
 const ENTRY_DELAY_MS = 2 * 60_000;
@@ -41,8 +40,7 @@ const localMinutes = (ms) => {
   return hour * 60 + Number(parts.find(({ type }) => type === 'minute').value);
 };
 
-export function createSignal({ onBreakout, telemetry, entryCutoffMinuteET = ENTRY_CUTOFF_MINUTE_ET } = {}) {
-  const trace = (event, fields) => observe(telemetry, event, { actionSource: 'V5_AUTO', ...fields });
+export function createSignal({ onBreakout, entryCutoffMinuteET = ENTRY_CUTOFF_MINUTE_ET } = {}) {
   if (!Number.isInteger(entryCutoffMinuteET) || entryCutoffMinuteET < 0 || entryCutoffMinuteET >= 24 * 60) throw new RangeError('entryCutoffMinuteET must be an integer minute of day');
   if (typeof onBreakout !== 'function') throw new TypeError('onBreakout must be a function');
   const buyCutoffMinuteET = Math.min(entryCutoffMinuteET, 15 * 60 + 30);
@@ -79,11 +77,9 @@ export function createSignal({ onBreakout, telemetry, entryCutoffMinuteET = ENTR
     if (!Number.isFinite(price) || price <= 0) throw new TypeError('trade.price must be positive');
     if (latestSourceKey !== null && parsed.key < latestSourceKey) return { accepted: false, reason: 'late' };
     if (!session || now < session.openMs || now >= session.closeMs || tradeMs < session.openMs || tradeMs >= session.closeMs) {
-      trace('spy_trade_evaluation', { sourceTradeId: tradeId, sourceTimestamp: timestamp, receivedAt: now, spyPrice: price, accepted: false, reason: 'outside-session' });
       return { accepted: false, reason: 'outside-session' };
     }
     if (localMinutes(now) >= buyCutoffMinuteET || localMinutes(tradeMs) >= buyCutoffMinuteET || (session.date && (localDate(now) !== session.date || localDate(tradeMs) !== session.date))) {
-      trace('spy_trade_evaluation', { sourceTradeId: tradeId, sourceTimestamp: timestamp, receivedAt: now, spyPrice: price, accepted: false, reason: 'entry-cutoff' });
       return { accepted: false, reason: 'entry-cutoff' };
     }
 
@@ -97,10 +93,7 @@ export function createSignal({ onBreakout, telemetry, entryCutoffMinuteET = ENTR
     if (latestSourceKey === null || parsed.key > latestSourceKey) latestSourceKey = parsed.key;
 
     const direction = hasPriorTrade && price > high ? 'CALL' : hasPriorTrade && price < low ? 'PUT' : null;
-    const reason = now < warmupUntil ? 'warmup' : now < session.openMs + ENTRY_DELAY_MS || tradeMs < session.openMs + ENTRY_DELAY_MS ? 'entry-delay' : !hasPriorTrade ? 'no-prior-range' : direction ? 'breakout' : 'inside-range';
-    trace('spy_trade_evaluation', { sourceTradeId: tradeId, sourceTimestamp: timestamp, receivedAt: now, spyPrice: price, priorHigh: Number.isFinite(high) ? high : null, priorLow: Number.isFinite(low) ? low : null, priorCount: priorTrades.length, windowMs: WINDOW_MS, direction, accepted: reason === 'breakout', reason });
     if (now < warmupUntil || now < session.openMs + ENTRY_DELAY_MS || tradeMs < session.openMs + ENTRY_DELAY_MS) return { accepted: true };
-    if (hasPriorTrade && (price > high || price < low)) trace('signal_range', { direction: price > high ? 'CALL' : 'PUT', signalKey: `${price > high ? 'CALL' : 'PUT'}:${timestamp}:${price}`, sourceTradeId: tradeId, sourceTimestamp: timestamp, spyPrice: price, priorHigh: high, priorLow: low, priorCount: priorTrades.length, windowMs: WINDOW_MS, windowEnd: timestamp, receivedAt: now });
     if (hasPriorTrade && price > high) onBreakout({ direction: 'CALL', timestamp, spyPrice: price, sourceTradeId: tradeId, receivedAt: now, priorHigh: high, priorLow: low, priorCount: priorTrades.length });
     else if (hasPriorTrade && price < low) onBreakout({ direction: 'PUT', timestamp, spyPrice: price, sourceTradeId: tradeId, receivedAt: now, priorHigh: high, priorLow: low, priorCount: priorTrades.length });
     return { accepted: true };

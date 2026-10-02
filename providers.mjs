@@ -1,4 +1,3 @@
-import { observe } from './telemetry/trace.mjs';
 import { decode, encode } from '@msgpack/msgpack';
 import { WebSocket as DefaultWebSocket } from 'ws';
 import { normalizeTradeUpdate } from './alpaca.mjs';
@@ -38,18 +37,11 @@ const localET = (date, clock) => {
 
 const asSymbols = (symbols) => [...new Set((symbols ?? []).filter((symbol) => typeof symbol === 'string' && symbol))];
 
-export function createCalendar({ fetchImpl = fetch, key, secret, baseUrl, telemetry } = {}) {
+export function createCalendar({ fetchImpl = fetch, key, secret, baseUrl } = {}) {
   if (![PAPER_URL, LIVE_URL].includes(baseUrl)) throw new Error('Unsupported Alpaca API URL');
   const rows = new Map();
   let ordered = [];
-  const request = (path) => {
-    const failed = (error) => observe(telemetry, 'calendar_api_error', { path, errorName: error?.name, httpStatus: error?.httpStatus });
-    try {
-      const pending = fetchImpl(`${baseUrl}${path}`, { headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret } }).then(json);
-      void pending.then(undefined, failed);
-      return pending;
-    } catch (error) { failed(error); throw error; }
-  };
+  const request = (path) => fetchImpl(`${baseUrl}${path}`, { headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret } }).then(json);
 
   const loadCalendar = async ({ start, end }) => {
     if (!start || !end) throw new TypeError('calendar start and end are required');
@@ -122,19 +114,12 @@ const rawTrade = (frame) => ({
 
 const quote = (frame) => ({ symbol: frame.S, bid: Number(frame.bp), ask: Number(frame.ap), timestamp: frame.t instanceof Date ? frame.t.toISOString() : frame.t, raw: frame });
 
-export function createAlpacaProviders({ key, secret, fetchImpl = fetch, WebSocketImpl = DefaultWebSocket, baseUrl, telemetry } = {}) {
+export function createAlpacaProviders({ key, secret, fetchImpl = fetch, WebSocketImpl = DefaultWebSocket, baseUrl } = {}) {
   if (!key || !secret) throw new TypeError('Alpaca credentials are required');
   if (![PAPER_URL, LIVE_URL].includes(baseUrl)) throw new Error('Unsupported Alpaca API URL');
   const tradeWs = `${baseUrl.replace(/^https:/, 'wss:')}/stream`;
-  const request = (url, options = {}) => {
-    const failed = (error) => observe(telemetry, 'provider_api_error', { path: new URL(url).pathname, errorName: error?.name, httpStatus: error?.httpStatus });
-    try {
-      const pending = fetchImpl(url, { ...options, headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, ...(options.headers ?? {}) } }).then(json);
-      void pending.then(undefined, failed);
-      return pending;
-    } catch (error) { failed(error); throw error; }
-  };
-  const calendar = createCalendar({ fetchImpl, key, secret, baseUrl, telemetry });
+  const request = (url, options = {}) => fetchImpl(url, { ...options, headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, ...(options.headers ?? {}) } }).then(json);
+  const calendar = createCalendar({ fetchImpl, key, secret, baseUrl });
 
   const getContracts = async (direction, timestamp) => {
     if (!['CALL', 'PUT'].includes(direction)) throw new TypeError('direction must be CALL or PUT');

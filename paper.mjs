@@ -1,7 +1,4 @@
-import { observe, createTrace } from './telemetry/trace.mjs';
-import { createPostExitEvidence } from './telemetry/post-exit.mjs';
 import { appendFile, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
 import { createAlpacaBroker } from './alpaca.mjs';
 import { createAlpacaProviders } from './providers.mjs';
 import { createRuntime } from './runtime.mjs';
@@ -24,8 +21,7 @@ const dispatch = (runtime, name, value) => {
   else runtime.onOrderUpdate(value);
 };
 
-export const handleProviderStatus = (runtime, telemetry, value) => {
-  observe(telemetry, 'provider_status', { stream: value.stream, status: value.status, attempt: value.attempt, frameType: value.frame?.T ?? value.frame?.stream, message: value.frame?.msg, authStatus: value.frame?.data?.status, subscribedTrades: value.frame?.trades?.length, subscribedQuotes: value.frame?.quotes?.length, listeningTradeUpdates: value.frame?.data?.streams?.includes('trade_updates'), code: value.frame?.code, errorName: value.error?.name });
+export const handleProviderStatus = (runtime, value) => {
   if (runtime && value.stream?.endsWith('/v2/sip') && ['disconnected', 'reconnected'].includes(value.status)) runtime.onMarketDataReconnect();
 };
 
@@ -37,30 +33,19 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
   if (!suppliedCredentials && mode !== 'paper') throw new Error('MODE_CREDENTIALS_REQUIRED');
   const credentials = suppliedCredentials ?? await loadCloseoutCredentials(DEFAULT_ENV);
   const baseUrl = mode === 'paper' ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets';
-  let trace;
-  let telemetry;
-  let postExitEvidence;
   let releaseTradeAuthority;
-  const emit = (event, fields) => {
-    try { telemetry?.(event, fields); } catch {}
-    try { postExitEvidence?.emit(event, fields); } catch {}
-  };
-  const broker = createAlpacaBroker({ key: credentials.key ?? credentials.apiKey, secret: credentials.secret ?? credentials.apiSecret, baseUrl, telemetry: emit });
-  const providers = createAlpacaProviders({ key: credentials.key ?? credentials.apiKey, secret: credentials.secret ?? credentials.apiSecret, baseUrl, telemetry: emit });
+  const broker = createAlpacaBroker({ key: credentials.key ?? credentials.apiKey, secret: credentials.secret ?? credentials.apiSecret, baseUrl });
+  const providers = createAlpacaProviders({ key: credentials.key ?? credentials.apiKey, secret: credentials.secret ?? credentials.apiSecret, baseUrl });
   const pending = [];
   let runtime;
   let ready = false;
-  const traceLedgerWrites = { persistedEntries: 0, persistedExits: 0, pending: 0, failures: 0 };
   let acceptingSip = true;
   let connection;
   const onMessage = (name, value) => {
     if (name === 'sip' && !acceptingSip) return;
-    const receivedAtMs = name === 'opra' ? Date.now() : null;
-    const receivedMonoMs = name === 'opra' ? performance.now() : null;
     if (ready) {
       dispatch(runtime, name, value);
-      if (name === 'opra') { try { postExitEvidence?.quote(value, receivedAtMs, receivedMonoMs); } catch {} }
-    } else pending.push([name, value, receivedAtMs, receivedMonoMs]);
+    } else pending.push([name, value]);
   };
 
   const draining = async () => {
@@ -69,8 +54,7 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
       let snapshot;
       try {
         snapshot = await runtime.inspectCurrentOwnership();
-      } catch (error) {
-        observe(telemetry, 'drain_api_error', { errorName: error?.name, httpStatus: error?.httpStatus });
+      } catch {
         await new Promise((resolve) => setTimeout(resolve, DRAIN_POLL_MS));
         continue;
       }
@@ -78,7 +62,6 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
       const pendingSell = (snapshot.orders ?? []).some((order) => order.side === 'sell' && isSpyOption(order.symbol));
       const entry = runtime.getState().entry;
       const buy = Boolean(entry?.active) || (snapshot.orders ?? []).some((order) => order.side === 'buy' && String(order.clientOrderId ?? order.client_order_id ?? '').startsWith('v5-buy-'));
-      runtime.observeDrain(snapshot, !exposure && !pendingSell && !buy && !runtime.hasOwnership(), traceLedgerWrites);
       if (!exposure && !pendingSell && !buy && !runtime.hasOwnership()) return;
       await new Promise((resolve) => setTimeout(resolve, DRAIN_POLL_MS));
     }
@@ -89,15 +72,11 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
     const snapshot = await broker.inspectCurrentState();
     if (mode === 'paper') await assertManualMarkerClear(snapshot, { readOrder: (entry) => entry.clientOrderId ? broker.getOrderByClientOrderId(entry.clientOrderId) : broker.getOrder(entry.orderId) });
     const paths = modeAccountPaths(mode, snapshot.account);
-    trace = createTrace({ directory: join(paths.directory, 'telemetry') });
-    telemetry = trace.emit;
-    try { postExitEvidence = createPostExitEvidence({ directory: join(paths.directory, 'post-exit-evidence') }); } catch {}
     connection = providers.connect({
       onRawTrade: (value) => onMessage('sip', value),
       onQuote: (value) => onMessage('opra', value),
       onTradeUpdate: (value) => onMessage('tradeUpdates', value),
-      onStatus: (value) => handleProviderStatus(ready ? runtime : null, telemetry, value),
-      onDisconnect: (value) => observe(telemetry, 'provider_disconnect', { stream: value.stream, code: value.event?.code }),
+      onStatus: (value) => handleProviderStatus(ready ? runtime : null, value),
     });
 
     connection.subscribeOptions((snapshot.positions ?? []).map((position) => position.symbol).filter((symbol) => /^SPY\d{6}[CP]\d{8}$/.test(String(symbol))));
@@ -105,7 +84,6 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
     const now = new Date();
     const start = dateInET(now);
     const end = dateInET(now.getTime() + 7 * 86_400_000);
-    try { postExitEvidence?.emit('post_exit_context', { mode, accountHash: paths.accountHash, sessionDate: start }); } catch {}
     await providers.calendar.loadCalendar({ start, end });
     const session = untilClose ? providers.calendar.sessionFor(Date.now()) : null;
     const close = untilClose ? Date.parse(session?.close) : null;
@@ -119,27 +97,16 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
       return providers.getQuote(symbol);
     };
     const ledger = createLedger({
-      write: async (line, event) => {
-        traceLedgerWrites.pending++;
-        try {
-          await mkdir(paths.directory, { recursive: true });
-          await appendFile(paths.ledger, `${line}\n`);
-          if (event?.event === 'FILL') traceLedgerWrites.persistedEntries++;
-          if (event?.event === 'EXIT') traceLedgerWrites.persistedExits += Number(event.qty) || 0;
-          observe(telemetry, 'ledger_write_success', { ledgerEvent: event?.event, summary: event?.summary, tradeId: event?.tradeId, executionId: event?.executionId, persistedEntries: traceLedgerWrites.persistedEntries, persistedExits: traceLedgerWrites.persistedExits });
-        } catch (error) {
-          traceLedgerWrites.failures++;
-          observe(telemetry, 'ledger_write_failure', { ledgerEvent: event?.event, tradeId: event?.tradeId, executionId: event?.executionId, errorName: error?.name, errorCode: error?.code });
-          throw error;
-        } finally { traceLedgerWrites.pending--; }
+      write: async (line) => {
+        await mkdir(paths.directory, { recursive: true });
+        await appendFile(paths.ledger, `${line}\n`);
       },
     });
-    runtime = createRuntime({ broker, telemetry: emit, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: mode === 'paper', ...(mode === 'paper' ? { strategyCapital: 500, entryQuantity: 1 } : {}), liquidateAt: untilClose ? close - 60_000 : null });
+    runtime = createRuntime({ broker, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: mode === 'paper', ...(mode === 'paper' ? { strategyCapital: 500, entryQuantity: 1 } : {}), liquidateAt: untilClose ? close - 60_000 : null });
     await runtime.start();
     ready = true;
-    for (const [name, value, receivedAtMs, receivedMonoMs] of pending.splice(0)) {
+    for (const [name, value] of pending.splice(0)) {
       dispatch(runtime, name, value);
-      if (name === 'opra') { try { postExitEvidence?.quote(value, receivedAtMs, receivedMonoMs); } catch {} }
     }
     let finish;
     const stopped = new Promise((resolve) => { finish = resolve; });
@@ -158,17 +125,6 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
     ready = false;
     connection?.stop();
     runtime?.stop();
-    if (postExitEvidence) {
-      try {
-        const status = postExitEvidence.status();
-        observe(telemetry, 'post_exit_evidence_status', {
-          enabled: status.enabled, failed: status.failed, failure: status.failure,
-          emitted: status.emitted, written: status.written, dropped: status.dropped, truncated: status.truncated,
-        });
-      } catch {}
-      try { postExitEvidence.stop(); } catch {}
-    }
-    trace?.stop();
     try { await releaseTradeAuthority?.(); } catch {}
   }
 }

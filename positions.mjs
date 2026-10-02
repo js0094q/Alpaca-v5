@@ -1,4 +1,3 @@
-import { observe } from './telemetry/trace.mjs';
 import { randomUUID } from 'node:crypto';
 
 const finite = (value) => {
@@ -24,11 +23,7 @@ const epochMs = (value) => {
   return parsed + (discarded && /[1-9]/.test(discarded) ? 1 : 0);
 };
 
-export function createPositions({ broker, onExit = () => {}, onExecutionIssue = () => {}, onState = () => {}, now = () => Date.now(), nowMono = () => Date.now(), telemetry }) {
-  const trace = (event, fields = {}) => {
-    const trade = fields.tradeId ? trades.get(fields.tradeId) : null;
-    observe(telemetry, event, { actionSource: 'V5_AUTO', ...(trade?.signalId ? { signalId: trade.signalId } : {}), ...(trade?.tradeSetId ? { tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId } : {}), ...fields });
-  };
+export function createPositions({ broker, onExit = () => {}, onExecutionIssue = () => {}, onState = () => {}, now = () => Date.now(), nowMono = () => Date.now() }) {
   const trades = new Map();
   const orders = new Map();
   const latestQuotes = new Map();
@@ -45,7 +40,6 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
   const issue = (trade, reason, details) => {
     const data = { reason, tradeId: trade.tradeId, symbol: trade.symbol, ...details };
     executionIssues.set(`${reason}:${details.orderId}`, data);
-    trace('sell_execution_issue', data);
     onExecutionIssue(data);
   };
   const resolveIssue = (reason, orderId) => {
@@ -87,17 +81,14 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     for (const id of trade.orderIds) {
       if (terminalOrders.has(id) || cancelRequested.has(id)) continue;
       cancelRequested.add(id);
-      trace('sell_cancel_request', { tradeId: trade.tradeId, orderId: id });
       Promise.resolve().then(() => broker.cancelOrder(id)).then(() => {
         // HTTP acceptance is not terminal: retain the order until its stream event.
-        trace('sell_cancel_response', { tradeId: trade.tradeId, orderId: id });
         notify(trade);
       }).catch(async (error) => {
         if (!terminalOrders.has(id)) {
           try {
             if (await confirmTerminalCancel(trade, id)) {
               markTerminal(id);
-              trace('sell_cancel_terminal_confirmed', { tradeId: trade.tradeId, orderId: id });
             }
           } catch { /* Missing authoritative evidence keeps the cancellation blocker. */ }
         }
@@ -118,16 +109,9 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     const anchor = cents(trade.anchorBid);
     return entry === null || anchor === null ? null : Math.max(entry, anchor);
   };
-  const phase = (trade) => trade.remainingQty <= 0 ? 'CLOSED' : trade.sellLatched ? 'SELL_LATCHED' : trade.profitFloor === null ? 'HOLD' : 'TRAILING';
-  const latch = (trade, reason) => {
-    const priorPhase = phase(trade);
+  const latch = (trade) => {
     trade.sellLatched = true;
     trade.logicalSellId ||= `v5-sell-${randomUUID()}`;
-    const reference = referenceCents(trade);
-    const threshold = reason === 'loss_trigger' ? (reference === null ? null : reference / 100 * 0.9)
-      : reason === 'profit_floor' ? trade.profitFloor : null;
-    const comparison = reason === 'loss_trigger' ? 'bid<=threshold' : reason === 'profit_floor' ? 'bid<floor' : null;
-    trace('sell_latch', { tradeId: trade.tradeId, tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId, clientOrderId: trade.logicalSellId, symbol: trade.symbol, reason, threshold, comparison, entryPrice: trade.entryPrice, anchorBid: trade.anchorBid, activeDownsideFloor: trade.profitFloor, priorPhase, phase: phase(trade), logicalSellId: trade.logicalSellId, remainingQty: trade.remainingQty, bid: trade.quote?.bid, sourceTimestamp: trade.quote?.timestamp, quoteTimestamp: trade.quote?.timestamp, receivedAt: trade.quoteReceivedAtMs, receivedMonoMs: trade.quoteReceivedMonoMs });
     notify(trade);
     pump(trade);
   };
@@ -140,37 +124,27 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
 
     const evaluatedAt = Number.isFinite(acceptedAt) ? acceptedAt : null;
     const graceEndsAt = Number.isFinite(trade.fillTimestampMs) ? trade.fillTimestampMs + 10_000 : null;
-    let graceActive = trade.anchorBid === null;
-    const priorPhase = phase(trade);
-    const decision = (action) => {
-      const reference = referenceCents(trade);
-      return trace('lot_decision', { tradeId: trade.tradeId, tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId, symbol: trade.symbol, priorPhase, phase: phase(trade), action, evaluatedAt, receivedAt: evaluatedAt, receivedMonoMs: trade.quoteReceivedMonoMs, ageMs: evaluatedAt === null || !Number.isFinite(trade.fillTimestampMs) ? null : evaluatedAt - trade.fillTimestampMs, graceActive, graceEndsAt, anchorSetAtMs: trade.anchorSetAtMs ?? null, anchorSourceTimestamp: trade.anchorSourceTimestamp ?? null, bid: quote.bid, sourceTimestamp: quote.timestamp, quoteTimestamp: quote.timestamp, entryPrice: trade.entryPrice, anchorBid: trade.anchorBid, lossThreshold: reference === null ? null : reference / 100 * 0.9, lossComparison: 'bid<=lossThreshold', activeDownsideFloor: trade.profitFloor, floorComparison: 'bid<activeDownsideFloor', trailArmThreshold: reference === null ? null : (reference + 2) / 100, remainingQty: trade.remainingQty });
-    };
     let anchorQuote = false;
     if (trade.anchorBid === null) {
       if (graceEndsAt === null || evaluatedAt === null || evaluatedAt < graceEndsAt) {
-        decision(bid * 10 <= entry * 9 ? 'LOSS_SUPPRESSED_BY_GRACE' : 'WAIT_T10_ANCHOR');
         return;
       }
       trade.anchorBid = bid / 100;
       trade.anchorSetAtMs = evaluatedAt;
       trade.anchorSourceTimestamp = quote.timestamp ?? null;
       anchorQuote = true;
-      graceActive = false;
       notify(trade);
     }
 
     const reference = referenceCents(trade);
     if (bid * 10 <= reference * 9) {
-      latch(trade, 'loss_trigger');
-      decision('LOSS_LATCH');
+      latch(trade);
       return;
     }
-    if (anchorQuote) { decision('ANCHOR_SET'); return; }
+    if (anchorQuote) return;
     const floor = cents(trade.profitFloor);
     if (floor === null && bid >= reference + 2) {
       trade.profitFloor = (bid - 4) / 100;
-      decision('TRAIL_ARM');
       notify(trade);
       return;
     }
@@ -179,9 +153,8 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       notify(trade);
     }
     if (floor !== null && bid < cents(trade.profitFloor)) {
-      latch(trade, 'profit_floor');
-      decision('PROFIT_FLOOR_LATCH');
-    } else decision('HOLD');
+      latch(trade);
+    }
   }
 
   function pump(trade) {
@@ -191,10 +164,8 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     if (bid === null) return;
     if (trade.orderId && trade.lastSubmittedPrice === bid && trade.lastSubmittedQty === trade.remainingQty) return;
 
-    trace('sell_bid_used', { tradeId: trade.tradeId, tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId, symbol: trade.symbol, bid, sourceTimestamp: trade.quote?.timestamp, quoteTimestamp: trade.quote?.timestamp, receivedAt: trade.quoteReceivedAtMs, receivedMonoMs: trade.quoteReceivedMonoMs, remainingQty: trade.remainingQty });
     trade.inFlight = true;
     const quantity = trade.remainingQty;
-    trace('sell_request', { tradeId: trade.tradeId, tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId, symbol: trade.symbol, operation: trade.orderId ? 'replace' : 'submit', orderId: trade.orderId, clientOrderId: trade.logicalSellId, logicalSellId: trade.logicalSellId, quantity, bid, sourceTimestamp: trade.quote?.timestamp, receivedAt: trade.quoteReceivedAtMs, receivedMonoMs: trade.quoteReceivedMonoMs });
     const replacedOrderId = trade.orderId;
     const request = trade.orderId
       ? broker.replaceOrder(trade.orderId, { qty: quantity, limitPrice: bid })
@@ -208,7 +179,6 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       });
 
     Promise.resolve(request).then((result) => {
-      trace('sell_response', { tradeId: trade.tradeId, orderId: result?.id, status: result?.status, quantity, bid });
       trade.inFlight = false;
       trackOrder(trade, result?.id);
       if (replacedOrderId && result?.id && replacedOrderId !== result.id) successors.set(replacedOrderId, result.id);
@@ -232,7 +202,6 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       notify(trade);
       pump(trade);
     }).catch((error) => {
-      trace('sell_error', { tradeId: trade.tradeId, orderId: trade.orderId, errorName: error?.name, httpStatus: error?.httpStatus });
       trade.inFlight = false;
       if (replacedOrderId && !successors.has(replacedOrderId) && !(error?.httpStatus >= 400 && error?.httpStatus < 500 && ![408, 429].includes(error.httpStatus))) {
         issue(trade, 'SELL_REPLACE_UNKNOWN', { orderId: replacedOrderId, httpStatus: error?.httpStatus });
@@ -277,14 +246,12 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       inFlight: false
     };
     trades.set(trade.tradeId, trade);
-    trace('position_fill', { tradeId: trade.tradeId, tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId, executionId: trade.executionId, symbol: trade.symbol, entryPrice: trade.entryPrice, fillTimestampMs, remainingQty: trade.remainingQty });
     notify(trade);
     const currentQuote = latestQuotes.get(trade.symbol);
     if (currentQuote) {
       trade.quote = { ...currentQuote.quote };
       trade.quoteReceivedAtMs = currentQuote.acceptedAt;
       trade.quoteReceivedMonoMs = currentQuote.acceptedMono ?? null;
-      trace('position_quote_accepted', { tradeId: trade.tradeId, tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId, symbol: trade.symbol, bid: trade.quote.bid, ask: trade.quote.ask, quoteTimestamp: trade.quote.timestamp, sourceTimestamp: trade.quote.timestamp, receivedAt: trade.quoteReceivedAtMs, receivedMonoMs: trade.quoteReceivedMonoMs, source: 'cached_at_fill', sellLatched: trade.sellLatched, inFlight: trade.inFlight });
       evaluate(trade, trade.quote, currentQuote.acceptedAt);
       if (trade.sellLatched) pump(trade);
     }
@@ -301,7 +268,6 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       trade.quote = { ...acceptedQuote.quote };
       trade.quoteReceivedAtMs = acceptedQuote.acceptedAt;
       trade.quoteReceivedMonoMs = Number.isFinite(acceptedQuote.acceptedMono) ? acceptedQuote.acceptedMono : null;
-      trace('position_quote_accepted', { tradeId: trade.tradeId, tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId, symbol: trade.symbol, bid: trade.quote.bid, ask: trade.quote.ask, quoteTimestamp: trade.quote.timestamp, sourceTimestamp: trade.quote.timestamp, receivedAt: trade.quoteReceivedAtMs, receivedMonoMs: trade.quoteReceivedMonoMs, source: 'onQuote', sellLatched: trade.sellLatched, inFlight: trade.inFlight });
       evaluate(trade, trade.quote, acceptedQuote.acceptedAt);
       if (trade.sellLatched) pump(trade);
     }
@@ -334,7 +300,6 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     }
     cancelClosedOrders(trade);
     notify(trade);
-    trace('sell_order_update', { tradeId: trade.tradeId, orderId: update.orderId, logicalSellId: update.clientOrderId, orderEvent: update.event, executionId: update.executionId, fillQty: update.fillQty, fillPrice: update.fillPrice, brokerTimestamp: update.timestamp, replacedBy: update.replacedBy });
     if (update.executionId && trade.seenSellExecutions.has(update.executionId)) return;
 
     const filledQty = Number(update.fillQty);
@@ -346,11 +311,9 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     observedFills.set(update.orderId, { qty: observed.qty + filledQty, value: observed.value + filledQty * price, timestamp: update.timestamp });
     if (filledQty > trade.remainingQty) issue(trade, 'SELL_OVERFILL', { orderId: update.orderId, executionId: update.executionId, excessQty: filledQty - trade.remainingQty, fillQty: filledQty, fillPrice: price, timestamp: update.timestamp });
     if (quantity <= 0) return;
-    const priorPhase = phase(trade);
     trade.remainingQty -= quantity;
     const premiumPnlPerShare = trade.entryPrice === null ? null : (cents(price) - cents(trade.entryPrice)) * quantity / 100;
     const realizedPnlUsd = premiumPnlPerShare === null || !Number.isFinite(trade.contractSize) || trade.contractSize <= 0 ? null : Math.round(premiumPnlPerShare * trade.contractSize * 100) / 100;
-    trace('position_exit', { tradeId: trade.tradeId, executionId: update.executionId, quantity, price, entryPrice: trade.entryPrice, premiumPnlPerShare, contractSize: trade.contractSize, contractSizeSource: trade.contractSizeSource, realizedPnlUsd, priorPhase, phase: phase(trade), remainingQty: trade.remainingQty, brokerTimestamp: update.timestamp });
     cancelClosedOrders(trade);
     notify(trade);
     onExit({
@@ -400,7 +363,6 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     };
     trades.set(trade.tradeId, trade);
     if (trade.orderId) orders.set(trade.orderId, trade);
-    trace('position_restored', { tradeId: trade.tradeId, executionId: trade.executionId, symbol: trade.symbol, entryPrice: trade.entryPrice, fillTimestampMs: trade.fillTimestampMs, remainingQty: trade.remainingQty, profitFloor: trade.profitFloor, sellLatched: trade.sellLatched, logicalSellId: trade.logicalSellId, orderId: trade.orderId, recovery: trade.entryPrice === null });
     notify(trade);
     return snapshot(trade);
   }
@@ -424,7 +386,6 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     };
     trades.set(trade.tradeId, trade);
     if (orderId) orders.set(orderId, trade);
-    trace('position_restored', { tradeId: trade.tradeId, executionId: trade.executionId, symbol: trade.symbol, entryPrice: trade.entryPrice, fillTimestampMs: trade.fillTimestampMs, remainingQty: trade.remainingQty, profitFloor: trade.profitFloor, sellLatched: trade.sellLatched, logicalSellId: trade.logicalSellId, orderId: trade.orderId, recovery: trade.entryPrice === null });
     notify(trade);
     return snapshot(trade);
   }

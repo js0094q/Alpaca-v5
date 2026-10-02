@@ -36,16 +36,13 @@ try {
 } finally { startupRuntime.stop(); }
 
 const broker = makeBroker();
-const runtimeEvents = [];
-const runtime = createRuntime({ broker, calendar, now: () => wall, nowMono: () => mono, telemetry: (event, fields) => runtimeEvents.push({ event, fields }), continuity: continuity(), ...options });
+const runtime = createRuntime({ broker, calendar, now: () => wall, nowMono: () => mono, continuity: continuity(), ...options });
 try {
   await runtime.startup();
   const sourceTimestamp = new Date(wall).toISOString().replace('.000Z', '.000000123Z');
   const raw = { symbol: 'SPY', price: 659, timestamp: sourceTimestamp, conditions: [' '], tradeId: 1, exchange: 'K', tape: 'A', rawType: 't' };
   assert.equal(runtime.onRawTrade(raw).accepted, true);
-  assert.deepEqual(runtimeEvents.filter(({ event }) => event === 'sip_trade_accepted').map(({ fields }) => [fields.sourceTimestamp, fields.receivedAt, fields.tradeId]), [[sourceTimestamp, wall, 1]]);
   assert.equal(runtime.onRawTrade(raw).accepted, false, 'duplicate SIP print is not accepted twice');
-  assert.equal(runtimeEvents.filter(({ event }) => event === 'sip_trade_accepted').length, 1);
   for (let i = 0; i < 30; i += 1) { wall += 1_000; runtime.onTrade({ timestamp: new Date(wall).toISOString(), price: 659 }); }
   wall += 1_000; runtime.onTrade({ timestamp: new Date(wall).toISOString(), price: 660 });
   await flush(); await flush();
@@ -61,7 +58,7 @@ try {
   assert.equal(runtime.getState().state, 'MANAGING');
   assert.equal([...broker.orders.values()].filter((o) => o.side === 'sell').length, 0, 'cutoff does not force an exit');
   const initialWarmup = runtime.getState().warmupUntil;
-  const providerStatus = (stream, status) => handleProviderStatus(runtime, () => {}, { stream, status });
+  const providerStatus = (stream, status) => handleProviderStatus(runtime, { stream, status });
   for (const stream of ['wss://stream.data.alpaca.markets/v1beta1/opra', 'wss://paper-api.alpaca.markets/stream']) {
     providerStatus(stream, 'disconnected'); providerStatus(stream, 'reconnected');
   }
@@ -77,9 +74,6 @@ try {
   await flush(); await flush();
   const sells = [...broker.orders.values()].filter((o) => o.side === 'sell');
   assert.equal(sells.length, 3, 'owned SELL management remains allowed at broker BUY cutoff'); assert.ok(sells.every((o) => o.qty === 1));
-  const acceptedQuotes = runtimeEvents.filter(({ event }) => event === 'position_quote_accepted');
-  assert.equal(acceptedQuotes.length, 9);
-  assert(acceptedQuotes.every(({ fields }) => typeof fields.sourceTimestamp === 'string' && fields.sourceTimestamp === fields.quoteTimestamp));
   providerStatus('wss://stream.data.alpaca.markets/v2/sip', 'reconnected');
   assert.equal(runtime.getState().warmupUntil, wall + 30_000);
   assert.equal(runtime.getState().state, 'MANAGING', 'ownership remains until broker SELL fills');
@@ -136,7 +130,6 @@ const makeRecovery = async ({ trade = {}, extraTrades = [], startupPositions = [
   let inspections = 0;
   let mutations = 0;
   const events = [];
-  const traces = [];
   const saved = continuity();
   saved.save([{ tradeId: 'stale-lot', executionId: 'buy-stale', symbol, entryPrice: 1,
     fillTimestampMs: Date.parse('2026-09-23T13:59:40Z'), anchorBid: 1, anchorTimestampMs: Date.parse('2026-09-23T13:59:50Z'),
@@ -149,14 +142,14 @@ const makeRecovery = async ({ trade = {}, extraTrades = [], startupPositions = [
       cancelOrder: async () => { mutations++; throw new Error('recovery must not cancel an order'); },
     },
     calendar, now: () => Date.parse('2026-09-23T10:00:00-04:00'), nowMono: () => recoveryMono,
-    continuity: saved, ledger: (event) => events.push(event), telemetry: (event) => traces.push(event), ...options,
+    continuity: saved, ledger: (event) => events.push(event), ...options,
   });
   await runtime.startup();
   assert.equal(runtime.getState().state, 'MANAGING');
   const poll = async (at, next = snapshot) => {
     recoveryMono = at; snapshot = next; runtime.tick(); await flush(); await flush();
   };
-  return { runtime, saved, events, traces, poll, inspections: () => inspections, mutations: () => mutations };
+  return { runtime, saved, events, poll, inspections: () => inspections, mutations: () => mutations };
 };
 
 const recovered = await makeRecovery();
