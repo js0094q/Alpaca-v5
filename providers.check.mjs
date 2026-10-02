@@ -3,8 +3,10 @@ import { decode, encode } from '@msgpack/msgpack';
 import { createAlpacaProviders } from './providers.mjs';
 
 const requests = [];
-const fetchImpl = async (url) => {
+const requestOptions = [];
+const fetchImpl = async (url, options) => {
   requests.push(url);
+  requestOptions.push(options);
   const body = url.includes('/calendar')
     ? [{ date: '2026-09-21', open: '09:30', close: '16:00' }]
     : url.includes('/contracts')
@@ -20,22 +22,35 @@ class MockSocket {
   readyState = 1;
   sent = [];
   handlers = new Map();
+  pings = 0;
   constructor(url) { this.url = url; MockSocket.sockets.push(this); }
   addEventListener(type, handler) { this.handlers.set(type, [...(this.handlers.get(type) ?? []), handler]); }
+  on(type, handler) { this.handlers.set(type, [...(this.handlers.get(type) ?? []), handler]); }
   send(value) { this.sent.push(value); }
+  ping() { this.pings++; }
   close() { this.closed = true; this.readyState = 3; }
+  terminate() { this.terminated = true; this.close(); }
   emit(type, data) { for (const handler of this.handlers.get(type) ?? []) handler(type === 'message' ? { data } : data); }
 }
 
 const providers = createAlpacaProviders({ key: 'key', secret: 'secret', baseUrl: 'https://paper-api.alpaca.markets', fetchImpl, WebSocketImpl: MockSocket });
+const nativeAbortTimeout = AbortSignal.timeout;
+const timeoutValues = [];
+AbortSignal.timeout = (ms) => { timeoutValues.push(ms); return nativeAbortTimeout.call(AbortSignal, ms); };
 const contracts = await providers.getContracts('CALL', '2026-09-21T13:31:00Z');
 assert.deepEqual(contracts, [{ symbol: 'SPY260921C00600000', strike: 600, contractSize: 100 }, { symbol: 'SPY260921C00601000', strike: 601 }]);
+const contractRequestCount = requests.length;
+assert.deepEqual(await providers.getContracts('CALL', '2026-09-21T13:31:00Z'), contracts, 'successful same-day contract result is cached');
+assert.equal(requests.length, contractRequestCount, 'cache avoids another paginated chain read');
 assert.ok(requests.every((url) => !url.includes('/v1/options/contracts')));
 assert.ok(requests.some((url) => url.includes('/v2/options/contracts')));
 assert.deepEqual(await providers.getQuote(contracts[0].symbol), { symbol: contracts[0].symbol, bid: 1.2, ask: 1.25, timestamp: '2026-09-21T13:31:00Z' });
 await providers.calendar.loadCalendar({ start: '2026-09-21', end: '2026-09-21' });
 assert.equal(providers.calendar.sessionFor('2026-09-21T14:00:00Z').status, 'open');
 assert.equal(providers.calendar.sessionFor('2026-09-21T14:00:00Z').date, '2026-09-21');
+assert.ok(timeoutValues.length >= 4 && timeoutValues.every((ms) => ms === 5_000), 'all REST reads receive the fixed five-second timeout');
+assert.ok(requestOptions.every(({ signal, redirect }) => signal instanceof AbortSignal && redirect === 'error'), 'REST reads use abort signals and reject redirects');
+AbortSignal.timeout = nativeAbortTimeout;
 
 const rawTrades = [];
 const quotes = [];
@@ -173,3 +188,37 @@ try {
 }
 assert.equal(MockSocket.sockets.every((socket) => socket.closed), true);
 assert.ok(requests.some((url) => url.includes('feed=opra')));
+
+const nativeSetInterval = globalThis.setInterval;
+const nativeClearInterval = globalThis.clearInterval;
+const nativeDateNow = Date.now;
+const heartbeatTicks = [];
+const clearedIntervals = [];
+let heartbeatNow = 10_000;
+globalThis.setInterval = (run, delay) => { assert.equal(delay, 10_000); heartbeatTicks.push(run); return heartbeatTicks.length; };
+globalThis.clearInterval = (handle) => clearedIntervals.push(handle);
+Date.now = () => heartbeatNow;
+const heartbeatDisconnects = [];
+const heartbeatEvents = [];
+const priorSocketCount = MockSocket.sockets.length;
+const heartbeatConnection = providers.connect({ onDisconnect: (event) => heartbeatDisconnects.push(event), onStatus: (event) => heartbeatEvents.push(event) });
+try {
+  assert.equal(heartbeatTicks.length, 3, 'each transport has one heartbeat monitor');
+  const heartbeatSockets = MockSocket.sockets.slice(priorSocketCount);
+  for (const socket of heartbeatSockets) socket.emit('open');
+  heartbeatNow += 10_000;
+  for (const tick of heartbeatTicks) tick();
+  assert.deepEqual(heartbeatSockets.map((socket) => socket.pings), [1, 1, 1], 'each live ws transport sends a protocol ping');
+  for (const socket of heartbeatSockets) socket.emit('pong');
+  heartbeatNow += 25_001;
+  for (const tick of heartbeatTicks) tick();
+  assert.equal(heartbeatDisconnects.length, 3, 'missing pong triggers one disconnect per transport');
+  assert.ok(heartbeatEvents.filter((event) => event.status === 'disconnected').every((event) => event.event.reason === 'heartbeat_timeout'));
+  assert.ok(heartbeatSockets.every((socket) => socket.terminated), 'unresponsive sockets are terminated');
+} finally {
+  heartbeatConnection.stop();
+  globalThis.setInterval = nativeSetInterval;
+  globalThis.clearInterval = nativeClearInterval;
+  Date.now = nativeDateNow;
+}
+assert.equal(clearedIntervals.length, 3, 'stop clears every heartbeat monitor');

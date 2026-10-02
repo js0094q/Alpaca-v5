@@ -1,4 +1,9 @@
-# V5 Linux release operations
+# V5 generic Linux release operations
+
+**Superseded for the verified `jslive` host.** Use
+[`deploy/jslive/README.md`](../jslive/README.md) and its manual service unit.
+Do not run this directory's revision installer, rollback script, wrapper, or
+timer on `jslive`; its existing home/repository/state layout differs.
 
 These scripts prepare a revisioned release on a Linux host and leave
 `v5-live.service` inactive and `v5-live.timer` disabled. They do not launch the

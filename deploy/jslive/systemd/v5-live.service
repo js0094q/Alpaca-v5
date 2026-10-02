@@ -1,0 +1,25 @@
+[Unit]
+Description=V5 manually started LIVE morning session
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=v5bot
+WorkingDirectory=/home/v5bot/The-Final-Trading-Bot-V5
+Environment=HOME=/home/v5bot
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=TZ=America/New_York
+ExecStart=/usr/local/bin/node supervise.mjs --mode=live --stop-at=12:00 --flatten-at=15:45
+Restart=no
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=infinity
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/v5bot/The-Final-Trading-Bot-V5/state
+StandardOutput=journal
+StandardError=journal

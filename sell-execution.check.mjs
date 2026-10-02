@@ -1,9 +1,18 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createAlpacaBroker as createAlpacaBrokerImpl, normalizeTradeUpdate } from './alpaca.mjs';
 const createAlpacaBroker = (options) => createAlpacaBrokerImpl({ baseUrl: 'https://paper-api.alpaca.markets', ...options });
 const { createPositions } = await import(process.env.POSITIONS_MODULE || './positions.mjs');
-const fixtures = JSON.parse(await readFile(new URL('./regression/sep25-sell-traces.json', import.meta.url)));
+// Synthetic records retain only the order lineage and execution fields used by
+// this regression; private broker traces are not required to run the check.
+const fixtures = [{
+  source: 'synthetic replacement/fill ordering',
+  records: [
+    { fields: { tradeId: 'fixture-sell-chain', symbol: 'SPY261005C00660000', bid: 1.1, logicalSellId: 'fixture-sell', orderId: 'parent' } },
+    { fields: { orderId: 'child', status: 'new' } },
+    { fields: { orderId: 'parent', replacedBy: 'child', orderEvent: 'fill', executionId: 'parent-fill', fillQty: 1, fillPrice: 1.1, brokerTimestamp: '2026-10-05T14:00:00.000Z' } },
+    { fields: { orderId: 'child', replaces: 'parent', orderEvent: 'fill', executionId: 'child-fill', fillQty: 1, fillPrice: 1.1, brokerTimestamp: '2026-10-05T14:00:01.000Z' } },
+  ],
+}];
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const update = (record) => ({ ...record.fields, event: record.fields.orderEvent, timestamp: record.fields.brokerTimestamp });
 

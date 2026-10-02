@@ -3,7 +3,7 @@ const json = async (response) => { const body = await response.text(); if (!resp
 export function createAlpacaBroker({ key, secret, baseUrl, fetchImpl = fetch, mutationTimeoutMs = 5000 }) {
   if (!key || !secret) throw new TypeError('Alpaca credentials are required');
   if (!['https://paper-api.alpaca.markets', 'https://api.alpaca.markets'].includes(baseUrl)) throw new Error('Unsupported Alpaca API URL');
-  if (!Number.isFinite(mutationTimeoutMs) || mutationTimeoutMs <= 0) throw new RangeError('mutationTimeoutMs must be positive');
+  if (!Number.isSafeInteger(mutationTimeoutMs) || mutationTimeoutMs < 1 || mutationTimeoutMs > 0x7fff_ffff) throw new RangeError('mutationTimeoutMs must be an integer from 1 to 2147483647');
   const request = (path, options = {}) => {
     return fetchImpl(`${baseUrl}${path}`, { ...options, redirect: 'error', headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, 'content-type': 'application/json', ...(options.headers ?? {}) } }).then(json);
   };
@@ -15,11 +15,14 @@ export function createAlpacaBroker({ key, secret, baseUrl, fetchImpl = fetch, mu
     getOrder: (id) => request(`/v2/orders/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(5000) }),
     getOrderFills: (id) => request(`/v2/account/activities/FILL?order_id=${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(5000) }),
     getOrderByClientOrderId: (clientOrderId) => request(`/v2/orders:by_client_order_id?client_order_id=${encodeURIComponent(clientOrderId)}`, { signal: AbortSignal.timeout(5000) }),
-    inspectCurrentState: async () => ({
-      account: await request('/v2/account', { signal: AbortSignal.timeout(5000) }),
-      positions: await request('/v2/positions', { signal: AbortSignal.timeout(5000) }),
-      orders: await request('/v2/orders?status=open&nested=true&direction=asc', { signal: AbortSignal.timeout(5000) }),
-    }),
+    inspectCurrentState: async () => {
+      const [account, positions, orders] = await Promise.all([
+        request('/v2/account', { signal: AbortSignal.timeout(5000) }),
+        request('/v2/positions', { signal: AbortSignal.timeout(5000) }),
+        request('/v2/orders?status=open&nested=true&direction=asc', { signal: AbortSignal.timeout(5000) }),
+      ]);
+      return { account, positions, orders };
+    },
   };
 }
 

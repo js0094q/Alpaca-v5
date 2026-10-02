@@ -25,12 +25,13 @@ export const handleProviderStatus = (runtime, value) => {
   if (runtime && value.stream?.endsWith('/v2/sip') && ['disconnected', 'reconnected'].includes(value.status)) runtime.onMarketDataReconnect();
 };
 
-export async function runPaper({ mode, credentials: suppliedCredentials, durationMs = DEFAULT_DURATION_MS, untilClose = false, entryCutoffMinuteET = 15 * 60 + 30, stopAtMs = null, signal, dependencies = {} } = {}) {
+export async function runPaper({ mode, credentials: suppliedCredentials, durationMs = DEFAULT_DURATION_MS, untilClose = false, entryCutoffMinuteET = 15 * 60 + 30, stopAtMs = null, flattenAtMs = null, signal, dependencies = {} } = {}) {
   if (!['paper', 'live'].includes(mode)) throw new TypeError('mode must be paper or live');
   if (!Number.isFinite(durationMs) || durationMs <= 0) throw new TypeError('durationMs must be positive');
   if (!Number.isInteger(entryCutoffMinuteET) || entryCutoffMinuteET < 0 || entryCutoffMinuteET >= 24 * 60) throw new RangeError('entryCutoffMinuteET must be an integer minute of day');
   if (stopAtMs !== null && !Number.isFinite(stopAtMs)) throw new RangeError('stopAtMs must be a finite timestamp');
-  if (mode === 'live' && suppliedCredentials) throw new Error('LIVE_CREDENTIAL_OVERRIDE_FORBIDDEN');
+  if (flattenAtMs !== null && (!Number.isFinite(flattenAtMs) || untilClose)) throw new RangeError('flattenAtMs must be a finite timestamp and cannot combine with untilClose');
+  if (mode === 'live' && suppliedCredentials) throw Object.assign(new Error('LIVE_CREDENTIAL_OVERRIDE_FORBIDDEN'), { code: 'LIVE_CREDENTIAL_OVERRIDE_FORBIDDEN' });
   const credentials = mode === 'live'
     ? await (dependencies.loadModeCredentials ?? loadModeCredentials)(mode)
     : suppliedCredentials ?? await loadCloseoutCredentials(DEFAULT_ENV);
@@ -90,11 +91,16 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
     const start = dateInET(now);
     const end = dateInET(now.getTime() + 7 * 86_400_000);
     await providers.calendar.loadCalendar({ start, end });
-    const session = untilClose ? providers.calendar.sessionFor(Date.now()) : null;
-    const close = untilClose ? Date.parse(session?.close) : null;
+    const session = untilClose || flattenAtMs !== null ? providers.calendar.sessionFor(Date.now()) : null;
+    const close = untilClose || flattenAtMs !== null ? Date.parse(session?.close) : null;
     if (untilClose) {
       if (session?.status !== 'open' || !Number.isFinite(close) || close <= Date.now()) throw new Error('No remaining market session');
       durationMs = close - Date.now();
+    }
+    let liquidateAt = flattenAtMs;
+    if (flattenAtMs !== null) {
+      if (!Number.isFinite(close) || session?.date !== start) throw Object.assign(new Error('Cannot resolve the current trading session close for --flatten-at.'), { code: 'LIVE_FLATTEN_SESSION_UNKNOWN' });
+      liquidateAt = Math.min(flattenAtMs, close - 60_000);
     }
 
     const getQuote = async (symbol) => {
@@ -107,7 +113,7 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
         await appendFile(paths.ledger, `${line}\n`);
       },
     });
-    runtime = (dependencies.createRuntime ?? createRuntime)({ broker, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: true, strategyCapital: 500, entryQuantity: 1, liquidateAt: untilClose ? close - 60_000 : null });
+    runtime = (dependencies.createRuntime ?? createRuntime)({ broker, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: true, strategyCapital: 500, entryQuantity: 1, liquidateAt: untilClose ? close - 60_000 : liquidateAt });
     await runtime.start();
     ready = true;
     for (const [name, value] of pending.splice(0)) {
@@ -134,14 +140,48 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
   }
 }
 
+// Converts an Eastern wall-clock time (HH:MM) on the current Eastern date to epoch ms.
+export function stopAtFromEasternClock(clock, nowMs = Date.now(), { allowPast = false } = {}) {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(String(clock));
+  if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) throw new RangeError('--stop-at must be HH:MM Eastern time');
+  const [year, month, day] = dateInET(nowMs).split('-').map(Number);
+  const wall = Date.UTC(year, month - 1, day, Number(match[1]), Number(match[2]));
+  const offsetFor = (utcMs) => {
+    const name = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', timeZoneName: 'longOffset' }).formatToParts(new Date(utcMs)).find(({ type }) => type === 'timeZoneName')?.value ?? 'GMT';
+    const m = name.match(/GMT([+-])(\d{2})(?::(\d{2}))?/);
+    return m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] ?? 0)) * 60_000 : 0;
+  };
+  const stopAtMs = wall - offsetFor(wall - offsetFor(wall));
+  if (!allowPast && !(stopAtMs > nowMs)) throw new RangeError('--stop-at must be later today');
+  return stopAtMs;
+}
+
+const describeError = (error) => ({ name: error?.name ?? null, code: error?.code ?? null, httpStatus: error?.httpStatus ?? null });
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const mode = process.argv.find((arg) => arg.startsWith('--mode='))?.slice('--mode='.length);
+  const stopAtArg = process.argv.find((arg) => arg.startsWith('--stop-at='))?.slice('--stop-at='.length);
+  const flattenAtArg = process.argv.find((arg) => arg.startsWith('--flatten-at='))?.slice('--flatten-at='.length);
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);
-  runPaper({ mode, signal: controller.signal, untilClose: process.argv.includes('--until-close') }).then((report) => process.stdout.write(`${JSON.stringify(report)}\n`)).catch(() => {
-    process.stdout.write('{"error":"BOT_RUN_FAILED"}\n');
+  // Keep managing open positions if a background promise rejects; record why.
+  process.on('unhandledRejection', (reason) => {
+    process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), event: 'UNHANDLED_REJECTION', ...describeError(reason) })}\n`);
+    process.exitCode = 1;
+    controller.abort();
+  });
+  // A restart after the stop time runs in manage-only mode: no new BUYs, open
+  // positions keep their exits (and the flatten backstop) until flat, then exit 0.
+  Promise.resolve().then(() => {
+    const started = Date.now();
+    const stopAtMs = stopAtArg ? stopAtFromEasternClock(stopAtArg, started, { allowPast: true }) : null;
+    const flattenAtMs = flattenAtArg ? stopAtFromEasternClock(flattenAtArg, started, { allowPast: true }) : null;
+    if (stopAtMs !== null && flattenAtMs !== null && flattenAtMs < stopAtMs - 1 && flattenAtMs > started) throw new RangeError('--flatten-at must not be before --stop-at');
+    return runPaper({ mode, signal: controller.signal, untilClose: process.argv.includes('--until-close'), ...(stopAtMs !== null ? { stopAtMs } : {}), ...(flattenAtMs !== null ? { flattenAtMs } : {}) });
+  }).then((report) => process.stdout.write(`${JSON.stringify(report)}\n`)).catch((error) => {
+    process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), error: 'BOT_RUN_FAILED', ...describeError(error) })}\n`);
     process.exitCode = 1;
   }).finally(() => { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); });
 }

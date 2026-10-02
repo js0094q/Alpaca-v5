@@ -3,6 +3,27 @@ import { createAlpacaBroker } from './alpaca.mjs';
 import { createEntry } from './entry.mjs';
 import { createPositions } from './positions.mjs';
 
+for (const mutationTimeoutMs of [0, -1, 0.5, NaN, Infinity, 0x8000_0000]) {
+  assert.throws(() => createAlpacaBroker({ key: 'test', secret: 'test', baseUrl: 'https://paper-api.alpaca.markets', mutationTimeoutMs }), RangeError);
+}
+const inspectionRequests = [];
+let inspectionInFlight = 0;
+let maxInspectionInFlight = 0;
+const inspectionBroker = createAlpacaBroker({ key: 'test', secret: 'test', baseUrl: 'https://paper-api.alpaca.markets',
+  fetchImpl: async (url, options) => {
+    inspectionRequests.push({ url, options });
+    maxInspectionInFlight = Math.max(maxInspectionInFlight, ++inspectionInFlight);
+    await new Promise((resolve) => setImmediate(resolve));
+    inspectionInFlight--;
+    const body = url.endsWith('/account') ? { id: 'paper-account' } : url.endsWith('/positions') ? [] : [];
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  } });
+const inspectionSnapshot = await inspectionBroker.inspectCurrentState();
+assert.deepEqual(inspectionSnapshot, { account: { id: 'paper-account' }, positions: [], orders: [] });
+assert.equal(inspectionRequests.length, 3);
+assert.equal(maxInspectionInFlight, 3, 'read-only snapshot endpoints start concurrently');
+assert.ok(inspectionRequests.every(({ options }) => options.signal instanceof AbortSignal && options.redirect === 'error'));
+
 const timeoutBroker = createAlpacaBroker({ key: 'test', secret: 'test', baseUrl: 'https://paper-api.alpaca.markets', mutationTimeoutMs: 20,
   fetchImpl: (_url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })) });
 const keepAlive = setInterval(() => {}, 1000);

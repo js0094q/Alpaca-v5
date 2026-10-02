@@ -8,7 +8,49 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 export const TRADE_AUTHORITY_LOCK = join(ROOT, 'state', 'v5-trade-authority.lock');
 export const MANUAL_OWNERSHIP_MARKER = join(ROOT, 'state', 'v5-trade-authority.manual.json');
 
-export async function acquireTradeAuthority(role = 'bridge-manual', { lockPath = TRADE_AUTHORITY_LOCK } = {}) {
+const processGone = (pid) => {
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  try { process.kill(pid, 0); return false; } catch (error) { return error.code === 'ESRCH'; }
+};
+
+// A lock left by a crashed runner of the same role (its process no longer
+// exists) is moved aside once; any live, unreadable, or other-role owner still fails closed.
+export async function acquireTradeAuthority(role = 'bridge-manual', { lockPath = TRADE_AUTHORITY_LOCK, isProcessGone = processGone } = {}) {
+  try { return await acquireTradeAuthorityOnce(role, { lockPath }); }
+  catch (error) {
+    if (error.code !== 'PAPER_TRADE_AUTHORITY_LOCKED' || error.owner?.role !== role || !await isProcessGone(error.owner?.pid)) throw error;
+    const reclaimPath = `${lockPath}.reclaim`;
+    const reclaimToken = `${randomUUID()}\n`;
+    let reclaimHandle;
+    try {
+      reclaimHandle = await open(reclaimPath, 'wx', 0o600);
+      await reclaimHandle.writeFile(reclaimToken, 'utf8');
+    } catch (claimError) {
+      await reclaimHandle?.close().catch(() => {});
+      if (reclaimHandle) {
+        try { if (await readFile(reclaimPath, 'utf8') === reclaimToken) await unlink(reclaimPath); } catch {}
+      }
+      if (claimError.code === 'EEXIST') throw error;
+      throw claimError;
+    }
+    try {
+      let current = null;
+      try { current = JSON.parse(await readFile(lockPath, 'utf8')); } catch {}
+      if (current?.pid !== error.owner.pid || current?.acquiredAt !== error.owner.acquiredAt || current?.role !== role || !await isProcessGone(current.pid)) throw error;
+      await rename(lockPath, `${lockPath}.stale-${Date.now()}-${randomUUID()}`);
+    } finally {
+      await reclaimHandle.close();
+      try {
+        if (await readFile(reclaimPath, 'utf8') === reclaimToken) await unlink(reclaimPath);
+      } catch (cleanupError) {
+        if (cleanupError.code !== 'ENOENT') throw cleanupError;
+      }
+    }
+    return acquireTradeAuthorityOnce(role, { lockPath });
+  }
+}
+
+async function acquireTradeAuthorityOnce(role, { lockPath }) {
   if (!['bridge-manual', 'v5-paper', 'v5-live'].includes(role)) throw new TypeError('invalid trade authority role');
   const owner = JSON.stringify({ pid: process.pid, role, token: randomUUID(), acquiredAt: new Date().toISOString() });
   await mkdir(dirname(lockPath), { recursive: true });

@@ -8,6 +8,10 @@ const DATA_URL = 'https://data.alpaca.markets';
 const SIP_WS = 'wss://stream.data.alpaca.markets/v2/sip';
 const OPRA_WS = 'wss://stream.data.alpaca.markets/v1beta1/opra';
 const ET = 'America/New_York';
+const READ_TIMEOUT_MS = 5_000;
+const CONTRACT_CACHE_MS = 5 * 60_000;
+const HEARTBEAT_INTERVAL_MS = 10_000;
+const HEARTBEAT_TIMEOUT_MS = 25_000;
 
 const json = async (response) => {
   const body = await response.text();
@@ -41,7 +45,7 @@ export function createCalendar({ fetchImpl = fetch, key, secret, baseUrl } = {})
   if (![PAPER_URL, LIVE_URL].includes(baseUrl)) throw new Error('Unsupported Alpaca API URL');
   const rows = new Map();
   let ordered = [];
-  const request = (path) => fetchImpl(`${baseUrl}${path}`, { headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret } }).then(json);
+  const request = (path) => fetchImpl(`${baseUrl}${path}`, { signal: AbortSignal.timeout(READ_TIMEOUT_MS), redirect: 'error', headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret } }).then(json);
 
   const loadCalendar = async ({ start, end }) => {
     if (!start || !end) throw new TypeError('calendar start and end are required');
@@ -118,12 +122,25 @@ export function createAlpacaProviders({ key, secret, fetchImpl = fetch, WebSocke
   if (!key || !secret) throw new TypeError('Alpaca credentials are required');
   if (![PAPER_URL, LIVE_URL].includes(baseUrl)) throw new Error('Unsupported Alpaca API URL');
   const tradeWs = `${baseUrl.replace(/^https:/, 'wss:')}/stream`;
-  const request = (url, options = {}) => fetchImpl(url, { ...options, headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, ...(options.headers ?? {}) } }).then(json);
+  const request = (url, options = {}) => fetchImpl(url, { ...options, signal: options.signal ?? AbortSignal.timeout(READ_TIMEOUT_MS), redirect: 'error', headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, ...(options.headers ?? {}) } }).then(json);
   const calendar = createCalendar({ fetchImpl, key, secret, baseUrl });
 
+  // The same-day SPY chain is stable intraday; cache it briefly so a breakout
+  // does not wait on a full chain download before quoting and submitting.
+  const contractCache = new Map();
   const getContracts = async (direction, timestamp) => {
     if (!['CALL', 'PUT'].includes(direction)) throw new TypeError('direction must be CALL or PUT');
     const date = dateInET(timestamp);
+    const cacheKey = `${date}:${direction}`;
+    const cached = contractCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < CONTRACT_CACHE_MS) return (await cached.result).map((row) => ({ ...row }));
+    const result = fetchContracts(direction, date);
+    const entry = { at: Date.now(), result };
+    contractCache.set(cacheKey, entry);
+    try { return (await result).map((row) => ({ ...row })); }
+    catch (error) { if (contractCache.get(cacheKey) === entry) contractCache.delete(cacheKey); throw error; }
+  };
+  const fetchContracts = async (direction, date) => {
     const type = direction === 'CALL' ? 'call' : 'put';
     const result = [];
     let pageToken;
@@ -156,7 +173,7 @@ export function createAlpacaProviders({ key, secret, fetchImpl = fetch, WebSocke
     let stopped = false;
     let subscriptions = asSymbols(optionSymbols);
     const open = (url, headers, format, onFrame) => {
-      const state = { socket: null, timer: null, attempt: 0, authenticated: false, confirmed: false, failed: false, quotes: new Set() };
+      const state = { socket: null, timer: null, heartbeat: null, lastSeen: 0, attempt: 0, authenticated: false, confirmed: false, failed: false, quotes: new Set() };
       const status = (name, fields = {}) => onStatus({ stream: url, status: name, ...fields });
       const failed = (socket, event, error) => {
         if (stopped || state.socket !== socket || state.failed) return;
@@ -200,10 +217,14 @@ export function createAlpacaProviders({ key, secret, fetchImpl = fetch, WebSocke
         state.authenticated = false;
         state.confirmed = false;
         state.quotes.clear();
+        state.lastSeen = Date.now();
+        // A silently dropped TCP connection emits no close event; ws pongs prove liveness.
+        if (typeof socket.ping === 'function' && typeof socket.on === 'function') socket.on('pong', () => { if (state.socket === socket) state.lastSeen = Date.now(); });
         attach(socket, {
-          open: () => { if (!stopped && state.socket === socket) { status('connected'); write({ action: 'auth', key, secret }); } },
+          open: () => { if (!stopped && state.socket === socket) { state.lastSeen = Date.now(); status('connected'); write({ action: 'auth', key, secret }); } },
           message: (event) => {
             if (stopped || state.socket !== socket || state.failed) return;
+            state.lastSeen = Date.now();
             try { eachFrame(frames(event, format), (frame) => { if (!stopped && state.socket === socket && !state.failed) onFrame(frame, state, status, write, confirm, failed); }); }
             catch (error) { status('decode_error', { error }); failed(socket, undefined, error); }
           },
@@ -212,8 +233,20 @@ export function createAlpacaProviders({ key, secret, fetchImpl = fetch, WebSocke
         });
       };
       launch();
+      state.heartbeat = setInterval(() => {
+        const socket = state.socket;
+        if (stopped || !socket || state.failed || socket.readyState !== 1 || typeof socket.ping !== 'function') return;
+        if (Date.now() - state.lastSeen > HEARTBEAT_TIMEOUT_MS) {
+          failed(socket, { reason: 'heartbeat_timeout' }, undefined);
+          try { socket.terminate?.(); } catch {}
+          return;
+        }
+        try { socket.ping(); } catch (error) { failed(socket, undefined, error); }
+      }, HEARTBEAT_INTERVAL_MS);
+      state.heartbeat.unref?.();
       return { state, write, stop: (message) => {
         clearTimeout(state.timer);
+        clearInterval(state.heartbeat);
         const socket = state.socket;
         state.socket = null;
         try { if (message) send(socket, message, format); } catch {}
