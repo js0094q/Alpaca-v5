@@ -1,15 +1,17 @@
 const json = async (response) => { const body = await response.text(); if (!response.ok) { let details; try { details = JSON.parse(body); } catch {} const error = new Error(details?.message ?? body ?? 'Alpaca request failed'); error.httpStatus = response.status; error.code = details?.code; throw error; } return body ? JSON.parse(body) : null; };
 
-export function createAlpacaBroker({ key, secret, baseUrl, fetchImpl = fetch }) {
+export function createAlpacaBroker({ key, secret, baseUrl, fetchImpl = fetch, mutationTimeoutMs = 5000 }) {
   if (!key || !secret) throw new TypeError('Alpaca credentials are required');
   if (!['https://paper-api.alpaca.markets', 'https://api.alpaca.markets'].includes(baseUrl)) throw new Error('Unsupported Alpaca API URL');
+  if (!Number.isFinite(mutationTimeoutMs) || mutationTimeoutMs <= 0) throw new RangeError('mutationTimeoutMs must be positive');
   const request = (path, options = {}) => {
     return fetchImpl(`${baseUrl}${path}`, { ...options, headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, 'content-type': 'application/json', ...(options.headers ?? {}) } }).then(json);
   };
+  const mutationSignal = () => AbortSignal.timeout(mutationTimeoutMs);
   return {
-    submitOrder: (o) => request('/v2/orders', { method: 'POST', body: JSON.stringify({ symbol: o.symbol, qty: o.qty, side: o.side, type: 'limit', limit_price: o.limitPrice, time_in_force: 'day', client_order_id: o.clientOrderId, ...(o.positionIntent ? { position_intent: o.positionIntent } : {}) }) }).then((x) => ({ id: x.id, status: x.status, clientOrderId: x.client_order_id })),
-    replaceOrder: (id, o) => request(`/v2/orders/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ limit_price: o.limitPrice }) }).then((x) => ({ id: x.id, status: x.status, clientOrderId: x.client_order_id })),
-    cancelOrder: (id) => request(`/v2/orders/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(() => undefined),
+    submitOrder: (o) => request('/v2/orders', { method: 'POST', signal: mutationSignal(), body: JSON.stringify({ symbol: o.symbol, qty: o.qty, side: o.side, type: 'limit', limit_price: o.limitPrice, time_in_force: 'day', client_order_id: o.clientOrderId, ...(o.positionIntent ? { position_intent: o.positionIntent } : {}) }) }).then((x) => ({ id: x.id, status: x.status, clientOrderId: x.client_order_id })),
+    replaceOrder: (id, o) => request(`/v2/orders/${encodeURIComponent(id)}`, { method: 'PATCH', signal: mutationSignal(), body: JSON.stringify({ limit_price: o.limitPrice }) }).then((x) => ({ id: x.id, status: x.status, clientOrderId: x.client_order_id })),
+    cancelOrder: (id) => request(`/v2/orders/${encodeURIComponent(id)}`, { method: 'DELETE', signal: mutationSignal() }).then(() => undefined),
     getOrder: (id) => request(`/v2/orders/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(5000) }),
     getOrderFills: (id) => request(`/v2/account/activities/FILL?order_id=${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(5000) }),
     getOrderByClientOrderId: (clientOrderId) => request(`/v2/orders:by_client_order_id?client_order_id=${encodeURIComponent(clientOrderId)}`, { signal: AbortSignal.timeout(5000) }),

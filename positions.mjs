@@ -22,6 +22,10 @@ const epochMs = (value) => {
   // Broker sub-millisecond fills round up so loss eligibility never starts early.
   return parsed + (discarded && /[1-9]/.test(discarded) ? 1 : 0);
 };
+const ambiguousMutationError = (error) => {
+  const status = Number(error?.httpStatus);
+  return !Number.isInteger(status) || status >= 500 || [404, 408, 409, 429].includes(status) || /duplicate|already.*(?:exist|use)|must be unique/i.test(error?.message ?? '');
+};
 
 export function createPositions({ broker, onExit = () => {}, onExecutionIssue = () => {}, onState = () => {}, now = () => Date.now(), nowMono = () => Date.now() }) {
   const trades = new Map();
@@ -32,6 +36,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
   const successors = new Map();
   const cancelRequested = new Set();
   const executionIssues = new Map();
+  const mutationRecovery = new Map();
   const trackOrder = (trade, id) => {
     if (!id) return;
     trade.orderIds.add(id);
@@ -39,13 +44,101 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
   };
   const issue = (trade, reason, details) => {
     const data = { reason, tradeId: trade.tradeId, symbol: trade.symbol, ...details };
-    executionIssues.set(`${reason}:${details.orderId}`, data);
+    executionIssues.set(`${reason}:${details.orderId ?? details.logicalSellId ?? trade.tradeId}`, data);
     onExecutionIssue(data);
   };
   const resolveIssue = (reason, orderId) => {
     const key = `${reason}:${orderId}`;
     const resolved = executionIssues.get(key);
     if (resolved) { executionIssues.delete(key); onExecutionIssue({ ...resolved, resolved: true }); }
+  };
+  const knownFilled = (trade) => [...trade.orderIds].reduce((sum, id) => sum + (observedFills.get(id)?.qty ?? 0), 0);
+  const clearMutation = (trade, pending) => {
+    if (mutationRecovery.get(trade.tradeId) !== pending) return false;
+    mutationRecovery.delete(trade.tradeId);
+    resolveIssue(pending.reason, pending.orderId ?? trade.logicalSellId);
+    return true;
+  };
+  const reconcileMutation = async (trade, pending) => {
+    if (mutationRecovery.get(trade.tradeId) !== pending || pending.reading || nowMono() < pending.nextReadAt) return;
+    pending.reading = true;
+    pending.nextReadAt = nowMono() + 5_000;
+    try {
+      if (pending.kind === 'cancel') {
+        if (await confirmTerminalCancel(trade, pending.orderId)) {
+          markTerminal(pending.orderId);
+          clearMutation(trade, pending);
+          notify(trade);
+        }
+        return;
+      }
+      let order;
+      let replacedParentId = null;
+      if (pending.kind === 'submit') {
+        order = await broker.getOrderByClientOrderId(trade.logicalSellId);
+        if (!order || order.client_order_id !== trade.logicalSellId || order.symbol !== trade.symbol || order.side !== 'sell') return;
+      } else {
+        order = await broker.getOrder(pending.orderId);
+        if (!order || order.id !== pending.orderId || order.symbol !== trade.symbol || order.side !== 'sell') return;
+        if (pending.kind === 'replace') {
+          if (!order.replaced_by) return;
+          const child = await broker.getOrder(order.replaced_by);
+          if (!child || child.id !== order.replaced_by || child.replaces !== order.id || child.symbol !== trade.symbol || child.side !== 'sell') return;
+          replacedParentId = order.id;
+          order = child;
+        }
+      }
+      if (pendingMutationIsStale(trade, pending)) return;
+      const hasFilledEvidence = order.filled_qty !== null && order.filled_qty !== undefined && order.filled_qty !== '';
+      const brokerFilled = hasFilledEvidence ? Number(order.filled_qty) : null;
+      const knownQty = knownFilled(trade);
+      const orderQty = Number(order.qty);
+      const status = String(order.status ?? '').toLowerCase();
+      const openStatus = ['new', 'accepted', 'pending_new', 'partially_filled'].includes(status);
+      if (pending.kind === 'replace' && replacedParentId && trade.remainingQty <= 0 && openStatus &&
+          (!Number.isFinite(brokerFilled) || brokerFilled !== knownQty)) {
+        trackOrder(trade, replacedParentId);
+        trackOrder(trade, order.id);
+        successors.set(replacedParentId, order.id);
+        markTerminal(replacedParentId);
+        trade.orderId = order.id;
+        cancelClosedOrders(trade);
+        notify(trade);
+        return;
+      }
+      if (!Number.isFinite(brokerFilled) || brokerFilled !== knownQty ||
+          (orderQty !== trade.remainingQty && orderQty !== trade.remainingQty + knownQty)) return;
+      if (!['new', 'accepted', 'pending_new', 'partially_filled', 'filled', 'canceled', 'cancelled', 'rejected', 'expired', 'done'].includes(status)) return;
+      if (status === 'filled' && brokerFilled === 0) return;
+      trackOrder(trade, order.id);
+      trade.orderId = order.id;
+      if (replacedParentId) { successors.set(replacedParentId, order.id); markTerminal(replacedParentId); }
+      if (['filled', 'canceled', 'cancelled', 'rejected', 'expired', 'done'].includes(status)) markTerminal(order.id);
+      if (clearMutation(trade, pending)) {
+        if (trade.remainingQty <= 0) cancelClosedOrders(trade);
+        notify(trade);
+      }
+    } catch {
+      // An absent or incomplete lookup is not evidence that a mutation failed.
+    } finally {
+      pending.reading = false;
+      if (mutationRecovery.get(trade.tradeId) === pending) pending.nextReadAt = Math.max(pending.nextReadAt, nowMono() + 5_000);
+    }
+  };
+  const pendingMutationIsStale = (trade, pending) => mutationRecovery.get(trade.tradeId) !== pending;
+  const holdMutation = (trade, kind, orderId, error) => {
+    const reason = kind === 'replace' ? 'SELL_REPLACE_UNKNOWN' : kind === 'cancel' ? 'SELL_CANCEL_FAILED' : 'SELL_SUBMIT_UNKNOWN';
+    const pending = { kind, orderId, reason, reading: false, nextReadAt: nowMono() };
+    mutationRecovery.set(trade.tradeId, pending);
+    issue(trade, reason, { orderId, ...(kind === 'submit' ? { logicalSellId: trade.logicalSellId } : {}), httpStatus: error?.httpStatus });
+    void reconcileMutation(trade, pending);
+  };
+  const watchCancel = (trade, id, error = null) => {
+    if (mutationRecovery.has(trade.tradeId)) return;
+    const pending = { kind: 'cancel', orderId: id, reason: 'SELL_CANCEL_FAILED', reading: false, nextReadAt: nowMono() };
+    mutationRecovery.set(trade.tradeId, pending);
+    if (error) issue(trade, pending.reason, { orderId: id, httpStatus: error?.httpStatus });
+    void reconcileMutation(trade, pending);
   };
   function markTerminal(orderId) {
     terminalOrders.add(orderId);
@@ -83,6 +176,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       cancelRequested.add(id);
       Promise.resolve().then(() => broker.cancelOrder(id)).then(() => {
         // HTTP acceptance is not terminal: retain the order until its stream event.
+        if (!terminalOrders.has(id)) watchCancel(trade, id);
         notify(trade);
       }).catch(async (error) => {
         if (!terminalOrders.has(id)) {
@@ -92,7 +186,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
             }
           } catch { /* Missing authoritative evidence keeps the cancellation blocker. */ }
         }
-        if (!terminalOrders.has(id)) issue(trade, 'SELL_CANCEL_FAILED', { orderId: id, httpStatus: error?.httpStatus });
+        if (!terminalOrders.has(id)) watchCancel(trade, id, error);
         notify(trade);
       });
     }
@@ -159,6 +253,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
 
   function pump(trade) {
     if (!trade.sellLatched || trade.remainingQty <= 0 || trade.inFlight || terminalOrders.has(trade.orderId)) return;
+    if (mutationRecovery.has(trade.tradeId)) return;
     if ([...executionIssues.values()].some((entry) => entry.tradeId === trade.tradeId && entry.reason === 'SELL_REPLACE_UNKNOWN')) return;
     const bid = finite(trade.quote?.bid);
     if (bid === null) return;
@@ -203,8 +298,8 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       pump(trade);
     }).catch((error) => {
       trade.inFlight = false;
-      if (replacedOrderId && !successors.has(replacedOrderId) && !(error?.httpStatus >= 400 && error?.httpStatus < 500 && ![408, 429].includes(error.httpStatus))) {
-        issue(trade, 'SELL_REPLACE_UNKNOWN', { orderId: replacedOrderId, httpStatus: error?.httpStatus });
+      if (ambiguousMutationError(error) && !(replacedOrderId ? successors.has(replacedOrderId) : trade.orderId && trade.orderIds.has(trade.orderId))) {
+        holdMutation(trade, replacedOrderId ? 'replace' : 'submit', replacedOrderId, error);
       }
       trade.lastSubmittedPrice = null;
       trade.lastSubmittedQty = null;
@@ -278,11 +373,13 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     if (!trade && update?.clientOrderId) {
       trade = [...trades.values()].find((candidate) => candidate.logicalSellId === update.clientOrderId);
       if (trade && update.orderId) {
+        if (!trade.orderId) trade.orderId = update.orderId;
         trade.orderIds.add(update.orderId);
         orders.set(update.orderId, trade);
       }
     }
     if (!trade) return;
+    const pending = mutationRecovery.get(trade.tradeId);
     trackOrder(trade, update.orderId);
     trackOrder(trade, update.replacedBy);
     trackOrder(trade, update.replaces);
@@ -291,12 +388,25 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     if (update.replacedBy) {
       successors.set(update.orderId, update.replacedBy);
       if (trade.orderId === update.orderId) trade.orderId = update.replacedBy;
-      resolveIssue('SELL_REPLACE_UNKNOWN', update.orderId);
+      if (pending?.kind === 'replace' && pending.orderId === update.orderId) clearMutation(trade, pending);
+      else resolveIssue('SELL_REPLACE_UNKNOWN', update.orderId);
     }
     if (update.replaces) {
       successors.set(update.replaces, update.orderId);
       if (trade.orderId === update.replaces) trade.orderId = update.orderId;
-      resolveIssue('SELL_REPLACE_UNKNOWN', update.replaces);
+      if (pending?.kind === 'replace' && pending.orderId === update.replaces) clearMutation(trade, pending);
+      else resolveIssue('SELL_REPLACE_UNKNOWN', update.replaces);
+    }
+    if (pending?.kind === 'submit' && update.clientOrderId === trade.logicalSellId && update.orderId) {
+      trade.orderId = update.orderId;
+      clearMutation(trade, pending);
+    } else if (pending?.kind === 'replace' && update.replaces === pending.orderId && update.orderId) {
+      trade.orderId = update.orderId;
+      clearMutation(trade, pending);
+    } else if (pending?.kind === 'replace' && update.orderId === pending.orderId && ['order_replace_rejected', 'replace_rejected'].includes(String(update.event ?? '').toLowerCase())) {
+      clearMutation(trade, pending);
+    } else if (pending?.kind === 'cancel' && update.orderId === pending.orderId && ['canceled', 'cancelled', 'rejected', 'expired', 'fill'].includes(String(update.event ?? '').toLowerCase())) {
+      clearMutation(trade, pending);
     }
     cancelClosedOrders(trade);
     notify(trade);
@@ -401,6 +511,8 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     liquidate,
     onQuote,
     onOrderUpdate,
+    reconcilePending: () => { for (const trade of trades.values()) { const pending = mutationRecovery.get(trade.tradeId); if (pending) void reconcileMutation(trade, pending); else for (const id of trade.orderIds) if (cancelRequested.has(id) && !terminalOrders.has(id)) { watchCancel(trade, id); break; } } },
+    hasPendingMutation: (tradeId) => mutationRecovery.has(tradeId),
     hasPendingExecution: () => executionIssues.size > 0 || [...trades.values()].some((trade) => trade.remainingQty <= 0 && (trade.inFlight || [...trade.orderIds].some((id) => !terminalOrders.has(id)))),
     getTrades: () => [...trades.values()].map(snapshot),
     restoreTrade,

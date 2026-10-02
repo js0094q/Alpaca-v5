@@ -2,6 +2,12 @@ import { randomUUID } from 'node:crypto';
 
 const NO_FILL_MS = 2_000;
 const REMAINING_MS = 5_000;
+const RECOVERY_READ_MS = 5_000;
+
+const ambiguousMutationError = (error) => {
+  const status = Number(error?.httpStatus);
+  return !Number.isInteger(status) || status >= 500 || [404, 408, 409, 429].includes(status) || /duplicate|already.*(?:exist|use)|must be unique/i.test(error?.message ?? '');
+};
 
 export function createEntry({ broker, getContracts, getQuote, onFill, onState, nowMono, canSubmit = () => true, quantity = 3, strategyCapital = null }) {
   if (!Number.isInteger(quantity) || quantity <= 0) throw new TypeError('quantity must be a positive integer');
@@ -27,12 +33,14 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
   let seenExecutions = new Set();
   let terminalObserved = false;
   let cancelDue = false;
+  let pendingMutation = null;
+  let mutationGeneration = 0;
 
   const snapshot = () => ({
     orderId,
     status: orderStatus ?? state,
     remainingQty: Math.max(0, QTY - filled),
-    active: ['SELECTING', 'SUBMITTING', 'WORKING', 'REPLACING'].includes(state) || action === 'CANCEL',
+    active: ['SELECTING', 'SUBMITTING', 'WORKING', 'REPLACING'].includes(state) || Boolean(action) || Boolean(pendingMutation),
     ...(pausedReason ? { reason: pausedReason } : {}),
   });
   const emit = () => {
@@ -50,6 +58,92 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
     q && Number.isFinite(q.bid) && Number.isFinite(q.ask) &&
     q.bid >= 0 && q.ask >= q.bid && priceTicks(q.ask) - priceTicks(q.bid) <= priceTicks(maxSpread)
   );
+
+  const clearPendingMutation = (pending) => {
+    if (pendingMutation !== pending) return false;
+    pendingMutation = null;
+    mutationGeneration++;
+    action = null;
+    return true;
+  };
+
+  const matchingOrder = (order, { id, clientId = null, side = 'buy' } = {}) => Boolean(order &&
+    typeof order.id === 'string' && order.id && order.id === id &&
+    order.symbol === contract?.symbol && order.side === side &&
+    (clientId === null || order.client_order_id === clientId) &&
+    (Number(order.qty) === QTY || Number(order.qty) === Math.max(0, QTY - filled)));
+
+  const applyOrderSnapshot = (order) => {
+    if (order.filled_qty === null || order.filled_qty === undefined || order.filled_qty === '') return false;
+    const brokerFilled = Number(order.filled_qty);
+    if (!Number.isFinite(brokerFilled) || brokerFilled !== filled) return false;
+    const status = String(order.status ?? '').toLowerCase();
+    const open = ['new', 'accepted', 'pending_new', 'partially_filled'];
+    const terminal = ['filled', 'canceled', 'cancelled', 'rejected', 'expired', 'done'];
+    if (!open.includes(status) && !terminal.includes(status)) return false;
+    if (status === 'filled' && filled !== QTY) return false;
+    orderId = order.id;
+    knownOrderIds.add(order.id);
+    orderStatus = order.status;
+    terminalObserved = terminal.includes(status);
+    state = filled >= QTY ? 'FILLED' : terminalObserved ? 'DONE' : 'WORKING';
+    return true;
+  };
+
+  const recoverMutation = async (pending = pendingMutation) => {
+    if (!pending || pendingMutation !== pending || pending.reading || nowMono() < pending.nextReadAt) return;
+    pending.reading = true;
+    pending.nextReadAt = nowMono() + RECOVERY_READ_MS;
+    try {
+      let order;
+      if (pending.kind === 'submit') {
+        order = await broker.getOrderByClientOrderId(clientOrderId);
+        if (!matchingOrder(order, { id: order?.id, clientId: clientOrderId })) return;
+      } else {
+        order = await broker.getOrder(pending.orderId);
+        if (!matchingOrder(order, { id: pending.orderId, clientId: null })) return;
+        if (pending.kind === 'replace') {
+          if (!order.replaced_by) return;
+          const successor = await broker.getOrder(order.replaced_by);
+          if (!successor || successor.id !== order.replaced_by || successor.replaces !== order.id ||
+              successor.symbol !== contract?.symbol || successor.side !== 'buy' || Number(successor.qty) !== QTY) return;
+          order = successor;
+        } else if (!['filled', 'canceled', 'cancelled', 'rejected', 'expired', 'done'].includes(String(order.status ?? '').toLowerCase())) return;
+      }
+      if (pendingMutation !== pending || mutationGeneration !== pending.generation) return;
+      const status = String(order.status ?? '').toLowerCase();
+      if (pending.kind === 'replace' && filled >= QTY && ['new', 'accepted', 'pending_new', 'partially_filled'].includes(status) &&
+          (order.filled_qty === null || order.filled_qty === undefined || order.filled_qty === '' || Number(order.filled_qty) !== filled)) {
+        pending.childOrderId = order.id;
+        orderId = order.id; knownOrderIds.add(order.id); orderStatus = order.status; state = 'FILLED';
+        if (!pending.childCancelRequested) {
+          pending.childCancelRequested = true;
+          void Promise.resolve().then(() => broker.cancelOrder(order.id)).catch(() => {});
+        }
+        emit();
+        return;
+      }
+      if (!applyOrderSnapshot(order)) return;
+      if (pending.quote && pending.kind === 'replace') quote = pending.quote;
+      if (!clearPendingMutation(pending)) return;
+      if (state === 'FILLED' && !terminalObserved) void cancel();
+      else if (state === 'WORKING' && cancelDue) void cancel();
+      emit();
+    } catch {
+      // A failed, missing, or incomplete read leaves the mutation unresolved.
+    } finally {
+      pending.reading = false;
+      if (pendingMutation === pending) pending.nextReadAt = Math.max(pending.nextReadAt, nowMono() + RECOVERY_READ_MS);
+    }
+  };
+
+  const holdForRecovery = (kind, orderIdValue = null, q = null, status = 'UNKNOWN_OUTCOME') => {
+    const pending = { kind, orderId: orderIdValue, quote: q, generation: mutationGeneration, reading: false, nextReadAt: nowMono() };
+    pendingMutation = pending;
+    orderStatus = status;
+    action = kind === 'cancel' ? 'CANCEL' : kind === 'replace' ? 'REPLACE' : 'SUBMIT';
+    void recoverMutation(pending);
+  };
 
 
   const choose = async (event, contracts) => {
@@ -118,27 +212,29 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
     deadline = submittedAt + NO_FILL_MS;
     clientOrderId = `v5-buy-${randomUUID()}`;
     const submittedClientOrderId = clientOrderId;
+    const generation = ++mutationGeneration;
     emit();
     try {
       const result = await broker.submitOrder({ symbol: contract.symbol, qty: QTY, side: 'buy', limitPrice, clientOrderId });
-      if (clientOrderId !== submittedClientOrderId) return;
+      if (clientOrderId !== submittedClientOrderId || mutationGeneration !== generation) return;
       action = null;
       orderId = result.id;
       knownOrderIds.add(orderId);
       orderStatus = result.status;
-      state = terminalObserved ? 'DONE' : (filled >= QTY ? 'FILLED' : 'WORKING');
+      state = filled >= QTY ? 'FILLED' : terminalObserved ? 'DONE' : 'WORKING';
       emit();
       if (state === 'WORKING' && deadline !== null && nowMono() >= deadline) { cancelDue = true; void cancel(); }
     } catch (error) {
-      if (clientOrderId !== submittedClientOrderId) return;
-      action = null;
-      if (orderId) {
-        state = terminalObserved ? 'DONE' : (filled >= QTY ? 'FILLED' : 'WORKING');
-      } else if (error?.httpStatus >= 400 && error.httpStatus < 500 && ![408, 409, 429].includes(error.httpStatus) && !/duplicate|already.*(?:exist|use)|must be unique/i.test(error.message ?? '')) {
+      if (clientOrderId !== submittedClientOrderId || mutationGeneration !== generation) return;
+      if (orderId && knownOrderIds.has(orderId)) {
+        action = null;
+        state = filled >= QTY ? 'FILLED' : terminalObserved ? 'DONE' : 'WORKING';
+      } else if (!ambiguousMutationError(error)) {
+        action = null;
         orderStatus = 'rejected';
         state = 'DONE';
       } else {
-        orderStatus = 'UNKNOWN_OUTCOME';
+        holdForRecovery('submit');
       }
       emit();
       if (state === 'WORKING' && deadline !== null && nowMono() >= deadline) { cancelDue = true; void cancel(); }
@@ -153,9 +249,22 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
     state = 'REPLACING';
     emit();
     const oldOrderId = orderId;
+    const generation = ++mutationGeneration;
     try {
       const result = await broker.replaceOrder(oldOrderId, { qty: Math.max(0, QTY - filled), limitPrice: next });
-      if (orderId !== oldOrderId || state === 'FILLED' || state === 'DONE') return;
+      if (mutationGeneration !== generation) return;
+      if (!result?.id) { holdForRecovery('replace', oldOrderId, q); emit(); return; }
+      if (orderId !== oldOrderId || state === 'FILLED' || state === 'DONE') {
+        if (result?.id) {
+          knownOrderIds.add(oldOrderId); knownOrderIds.add(result.id); orderId = result.id;
+          orderStatus = result.status; terminalObserved = ['filled', 'canceled', 'cancelled', 'rejected', 'expired', 'done'].includes(String(result.status ?? '').toLowerCase());
+          state = filled >= QTY ? 'FILLED' : terminalObserved ? 'DONE' : 'WORKING';
+          action = null;
+          if (!terminalObserved) void cancel();
+          emit();
+        }
+        return;
+      }
       knownOrderIds.add(oldOrderId);
       orderId = result.id;
       knownOrderIds.add(orderId);
@@ -166,23 +275,29 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
       emit();
       if (cancelDue) void cancel();
     } catch (error) {
-      action = null;
-      state = filled >= QTY ? 'FILLED' : 'WORKING';
+      if (mutationGeneration !== generation) return;
+      if (ambiguousMutationError(error)) holdForRecovery('replace', oldOrderId, q);
+      else { action = null; state = filled >= QTY ? 'FILLED' : 'WORKING'; }
       emit();
       if (cancelDue) void cancel();
     }
   };
 
   const cancel = async () => {
-    if (!orderId || action || state !== 'WORKING' || filled >= QTY) return;
+    if (!orderId || action || !['WORKING', 'FILLED'].includes(state)) return;
     action = 'CANCEL';
+    const targetOrderId = orderId;
+    const generation = ++mutationGeneration;
     try {
-      await broker.cancelOrder(orderId);
+      await broker.cancelOrder(targetOrderId);
+      if (mutationGeneration !== generation) return;
       action = null;
       orderStatus = 'CANCEL_REQUESTED';
+      holdForRecovery('cancel', targetOrderId, null, 'CANCEL_REQUESTED');
       emit();
-    } catch (error) {
-      action = null;
+    } catch {
+      if (mutationGeneration !== generation) return;
+      holdForRecovery('cancel', targetOrderId);
       emit();
     }
   };
@@ -219,20 +334,75 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
       await submit();
     },
     onOrderUpdate(update) {
-      if (!update || (!orderId && update.clientOrderId !== clientOrderId)) return;
-      if (update.clientOrderId !== clientOrderId && !knownOrderIds.has(update.orderId) && !knownOrderIds.has(update.replacedBy)) return;
-      if (!orderId && clientOrderId && update.orderId) { orderId = update.orderId; knownOrderIds.add(orderId); }
+      if (!update) return;
+      const streamMatches = Boolean(clientOrderId && update.clientOrderId === clientOrderId) || knownOrderIds.has(update.orderId) ||
+        knownOrderIds.has(update.replaces) || knownOrderIds.has(update.replacedBy) ||
+        pendingMutation?.kind === 'replace' && update.replaces === pendingMutation.orderId;
+      if (!streamMatches) return;
+      const pending = pendingMutation;
+      const replacementStreamAdopted = action === 'REPLACE' && Boolean(update.orderId) &&
+        (update.replaces === orderId || update.orderId === orderId && Boolean(update.replacedBy));
+      if (!orderId && clientOrderId && update.clientOrderId === clientOrderId && update.orderId) {
+        orderId = update.orderId; knownOrderIds.add(orderId);
+      }
+      if (pending?.kind === 'submit' && update.clientOrderId === clientOrderId && update.orderId) {
+        orderId = update.orderId; knownOrderIds.add(orderId);
+      }
+      if (update.replaces && knownOrderIds.has(update.replaces) && update.orderId) {
+        knownOrderIds.add(update.orderId); orderId = update.orderId;
+      }
+      if (update.replacedBy && knownOrderIds.has(update.orderId)) {
+        knownOrderIds.add(update.replacedBy); orderId = update.replacedBy;
+      }
       if (update.executionId && seenExecutions.has(update.executionId)) return;
       if (update.executionId) seenExecutions.add(update.executionId);
       if (update.event) {
         orderStatus = update.event;
-        const terminal = ['canceled', 'cancelled', 'done', 'expired', 'rejected'].includes(String(update.event).toLowerCase());
+        const eventStatus = String(update.event).toLowerCase();
+        const terminal = ['canceled', 'cancelled', 'done', 'expired', 'rejected'].includes(eventStatus);
         if (terminal && (!orderId || update.orderId === orderId)) { terminalObserved = true; state = 'DONE'; }
+        if (action === 'CANCEL' && !pendingMutation && update.orderId === orderId && (terminal || String(update.event).toLowerCase() === 'fill')) {
+          mutationGeneration++; action = null;
+        }
+        if (action === 'REPLACE' && update.orderId === orderId && ['order_replace_rejected', 'replace_rejected'].includes(String(update.event).toLowerCase())) {
+          mutationGeneration++; action = null; state = filled >= QTY ? 'FILLED' : terminalObserved ? 'DONE' : 'WORKING';
+        }
       }
       notifyFill(update);
+      if (pendingMutation && pendingMutation === pending) {
+        const eventStatus = String(update.event ?? '').toLowerCase();
+        const sameOrder = update.orderId === pending.orderId || update.replaces === pending.orderId ||
+          pending.kind === 'replace' && update.orderId === pending.childOrderId ||
+          pending.kind === 'submit' && Boolean(clientOrderId) && update.clientOrderId === clientOrderId;
+        const successorByReplaces = pending.kind === 'replace' && update.replaces === pending.orderId && Boolean(update.orderId);
+        const successorByReplacedBy = pending.kind === 'replace' && update.orderId === pending.orderId && Boolean(update.replacedBy);
+        const successorProven = successorByReplaces || successorByReplacedBy;
+        const replaceRejected = pending.kind === 'replace' && update.orderId === pending.orderId &&
+          ['order_replace_rejected', 'replace_rejected'].includes(eventStatus);
+        const replacementChildTerminal = pending.kind === 'replace' && update.orderId === pending.childOrderId &&
+          ['fill', 'canceled', 'cancelled', 'done', 'expired', 'rejected'].includes(eventStatus);
+        const cancelTerminal = pending.kind === 'cancel' && sameOrder &&
+          ['fill', 'canceled', 'cancelled', 'done', 'expired', 'rejected'].includes(eventStatus);
+        if (pending.kind === 'submit' && sameOrder && update.orderId || successorProven || replaceRejected || replacementChildTerminal || cancelTerminal) {
+          if (successorByReplaces) { orderId = update.orderId; knownOrderIds.add(update.orderId); pending.childOrderId = update.orderId; }
+          if (successorByReplacedBy) { orderId = update.replacedBy; knownOrderIds.add(update.replacedBy); pending.childOrderId = update.replacedBy; }
+          if (pending.kind === 'submit' || pending.kind === 'cancel') {
+            if (update.orderId) orderId = update.orderId;
+            if (eventStatus === 'fill' && filled < QTY) {
+              // A fill status without its execution event cannot release the admission block.
+            } else if (clearPendingMutation(pending) && pending.kind === 'submit') state = filled >= QTY ? 'FILLED' : terminalObserved ? 'DONE' : 'WORKING';
+          } else if ((successorProven || replaceRejected || replacementChildTerminal) && clearPendingMutation(pending)) state = filled >= QTY ? 'FILLED' : terminalObserved ? 'DONE' : 'WORKING';
+        }
+      }
+      if (String(update.event ?? '').toLowerCase() === 'fill' && filled >= QTY && update.orderId === orderId) terminalObserved = true;
+      if (replacementStreamAdopted && action === 'REPLACE') {
+        mutationGeneration++; action = null; state = filled >= QTY ? 'FILLED' : 'WORKING';
+      }
+      if (replacementStreamAdopted && state === 'FILLED' && !terminalObserved && !pending?.childCancelRequested) void cancel();
       emit();
     },
     tick() {
+      if (pendingMutation) { void recoverMutation(pendingMutation); return; }
       if (!['WORKING', 'REPLACING'].includes(state) || !orderId) return;
       if (deadline !== null && nowMono() >= deadline) {
         cancelDue = true;
@@ -252,7 +422,7 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
     },
     nextDeadline() { return deadline; },
     ready() {
-      if (['DONE', 'FILLED', 'PAUSED'].includes(state)) {
+      if (!pendingMutation && !action && ['DONE', 'FILLED', 'PAUSED'].includes(state)) {
         state = 'IDLE'; pausedReason = null; orderId = null; orderStatus = null; filled = 0; deadline = null;
         action = null; clientOrderId = null; knownOrderIds = new Set(); seenExecutions = new Set(); cancelDue = false;
         breakout = null; contract = null; quote = null; cap = null; spreadCap = null; terminalObserved = false;

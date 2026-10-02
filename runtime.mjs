@@ -306,7 +306,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
         const position = snapshot.positions.filter((row) => row?.symbol === symbol);
         const openOrder = snapshot.orders.some((order) => !order || typeof order.symbol !== 'string' || !order.symbol || order.symbol === symbol ||
           String(order.clientOrderId ?? order.client_order_id ?? '').startsWith('v5-buy-'));
-        const flat = isSpyOption(symbol) && !local.some((trade) => trade.inFlight || (trade.sellLatched && !trade.orderId)) &&
+        const flat = isSpyOption(symbol) && !local.some((trade) => trade.inFlight || positions.hasPendingMutation(trade.tradeId) || (trade.sellLatched && !trade.orderId)) &&
           !openOrder && position.every((row) => {
             const qty = row.qty ?? row.quantity;
             return qty !== null && qty !== undefined && qty !== '' && Number.isFinite(Number(qty)) && Number(qty) === 0;
@@ -380,6 +380,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     if (session?.status === 'open') beginSession(session, current);
     else if (sessionDate && session?.date === sessionDate) finalizeLedger(sessionDate);
     entry.tick();
+    positions.reconcilePending();
     if (liquidateAt !== null && current >= liquidateAt) positions.liquidate();
     if (hasLongOwnership()) setState(recovering ? 'RECOVERING' : 'MANAGING');
     else if (state === 'COOLDOWN' && nowMono() >= cooldownUntil && !entryActive() && !hasOwnership()) {
