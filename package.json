@@ -7,6 +7,8 @@
     "check": "node runtime.check.mjs",
     "check:providers": "node providers.check.mjs",
     "paper": "node paper.mjs --mode=paper",
+    "live": "node paper.mjs --mode=live",
+    "check:live-credentials": "node live-credentials.check.mjs",
     "check:all": "node --input-type=module -e \"import { execFileSync, spawnSync } from 'node:child_process'; const files = execFileSync('git', ['ls-files', '-z']).toString().split('\\0').filter((file) => file.endsWith('.check.mjs')).sort(); let count = 0; for (const file of files) { console.log(); console.log('> ' + file); const result = spawnSync(process.execPath, [file], { stdio: 'inherit' }); if (result.error) throw result.error; if (result.status !== 0) process.exit(result.status ?? 1); count++; } const pythonCheck = 'alpaca-bot-bridge/supervise-tunnel.check.py'; console.log(); console.log('> ' + pythonCheck); const python = spawnSync('python3', ['-B', pythonCheck], { stdio: 'inherit' }); if (python.error) throw python.error; if (python.status !== 0) process.exit(python.status ?? 1); console.log(); console.log('All ' + count + ' tracked JavaScript checks and 1 Python check passed.');\""
   },
   "dependencies": {

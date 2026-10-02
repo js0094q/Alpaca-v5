@@ -9,7 +9,7 @@ export const TRADE_AUTHORITY_LOCK = join(ROOT, 'state', 'v5-trade-authority.lock
 export const MANUAL_OWNERSHIP_MARKER = join(ROOT, 'state', 'v5-trade-authority.manual.json');
 
 export async function acquireTradeAuthority(role = 'bridge-manual', { lockPath = TRADE_AUTHORITY_LOCK } = {}) {
-  if (!['bridge-manual', 'v5-paper'].includes(role)) throw new TypeError('invalid trade authority role');
+  if (!['bridge-manual', 'v5-paper', 'v5-live'].includes(role)) throw new TypeError('invalid trade authority role');
   const owner = JSON.stringify({ pid: process.pid, role, token: randomUUID(), acquiredAt: new Date().toISOString() });
   await mkdir(dirname(lockPath), { recursive: true });
   let handle;
@@ -102,4 +102,12 @@ export async function assertManualMarkerClear(snapshot, options = {}) {
   const state = await reconcileManualOwnership(snapshot, options);
   if (state.status !== 'none' && state.status !== 'cleared') throw Object.assign(new Error('BRIDGE_MANUAL order or unresolved outcome remains; V5 cannot assume ownership.'), { code: 'MANUAL_OWNERSHIP_UNRESOLVED', state });
   return state;
+}
+
+// The manual marker records ownership of orders submitted through the bridge.
+// V5 LIVE must fail closed while any such ownership record remains unresolved.
+export async function assertLiveManualMarkerClear({ markerPath = MANUAL_OWNERSHIP_MARKER } = {}) {
+  const marker = await readMarker(markerPath);
+  if (marker) throw Object.assign(new Error('BRIDGE_MANUAL ownership marker remains; V5 LIVE cannot assume ownership.'), { code: 'MANUAL_OWNERSHIP_UNRESOLVED', state: { status: 'unknown', orders: marker.orders.length } });
+  return { status: 'none' };
 }

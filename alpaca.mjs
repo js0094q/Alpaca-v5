@@ -5,7 +5,7 @@ export function createAlpacaBroker({ key, secret, baseUrl, fetchImpl = fetch, mu
   if (!['https://paper-api.alpaca.markets', 'https://api.alpaca.markets'].includes(baseUrl)) throw new Error('Unsupported Alpaca API URL');
   if (!Number.isFinite(mutationTimeoutMs) || mutationTimeoutMs <= 0) throw new RangeError('mutationTimeoutMs must be positive');
   const request = (path, options = {}) => {
-    return fetchImpl(`${baseUrl}${path}`, { ...options, headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, 'content-type': 'application/json', ...(options.headers ?? {}) } }).then(json);
+    return fetchImpl(`${baseUrl}${path}`, { ...options, redirect: 'error', headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, 'content-type': 'application/json', ...(options.headers ?? {}) } }).then(json);
   };
   const mutationSignal = () => AbortSignal.timeout(mutationTimeoutMs);
   return {

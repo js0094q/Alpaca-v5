@@ -4,8 +4,8 @@ import { createAlpacaProviders } from './providers.mjs';
 import { createRuntime } from './runtime.mjs';
 import { createLedger } from './ledger.mjs';
 import { createContinuity } from './continuity.mjs';
-import { loadCloseoutCredentials, PAPER_ENV, modeAccountPaths } from './paper-account.mjs';
-import { acquireTradeAuthority, assertManualMarkerClear } from './trade-authority.mjs';
+import { loadModeCredentials, assertLiveAccount, loadCloseoutCredentials, PAPER_ENV, modeAccountPaths } from './paper-account.mjs';
+import { acquireTradeAuthority, assertLiveManualMarkerClear, assertManualMarkerClear } from './trade-authority.mjs';
 
 const DEFAULT_ENV = PAPER_ENV;
 const DEFAULT_DURATION_MS = 10 * 60_000;
@@ -25,17 +25,19 @@ export const handleProviderStatus = (runtime, value) => {
   if (runtime && value.stream?.endsWith('/v2/sip') && ['disconnected', 'reconnected'].includes(value.status)) runtime.onMarketDataReconnect();
 };
 
-export async function runPaper({ mode, credentials: suppliedCredentials, durationMs = DEFAULT_DURATION_MS, untilClose = false, entryCutoffMinuteET = 15 * 60 + 30, stopAtMs = null, signal } = {}) {
+export async function runPaper({ mode, credentials: suppliedCredentials, durationMs = DEFAULT_DURATION_MS, untilClose = false, entryCutoffMinuteET = 15 * 60 + 30, stopAtMs = null, signal, dependencies = {} } = {}) {
   if (!['paper', 'live'].includes(mode)) throw new TypeError('mode must be paper or live');
   if (!Number.isFinite(durationMs) || durationMs <= 0) throw new TypeError('durationMs must be positive');
   if (!Number.isInteger(entryCutoffMinuteET) || entryCutoffMinuteET < 0 || entryCutoffMinuteET >= 24 * 60) throw new RangeError('entryCutoffMinuteET must be an integer minute of day');
   if (stopAtMs !== null && !Number.isFinite(stopAtMs)) throw new RangeError('stopAtMs must be a finite timestamp');
-  if (!suppliedCredentials && mode !== 'paper') throw new Error('MODE_CREDENTIALS_REQUIRED');
-  const credentials = suppliedCredentials ?? await loadCloseoutCredentials(DEFAULT_ENV);
+  if (mode === 'live' && suppliedCredentials) throw new Error('LIVE_CREDENTIAL_OVERRIDE_FORBIDDEN');
+  const credentials = mode === 'live'
+    ? await (dependencies.loadModeCredentials ?? loadModeCredentials)(mode)
+    : suppliedCredentials ?? await loadCloseoutCredentials(DEFAULT_ENV);
   const baseUrl = mode === 'paper' ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets';
   let releaseTradeAuthority;
-  const broker = createAlpacaBroker({ key: credentials.key ?? credentials.apiKey, secret: credentials.secret ?? credentials.apiSecret, baseUrl });
-  const providers = createAlpacaProviders({ key: credentials.key ?? credentials.apiKey, secret: credentials.secret ?? credentials.apiSecret, baseUrl });
+  const broker = (dependencies.createBroker ?? createAlpacaBroker)({ key: credentials.key ?? credentials.apiKey, secret: credentials.secret ?? credentials.apiSecret, baseUrl });
+  let providers;
   const pending = [];
   let runtime;
   let ready = false;
@@ -68,10 +70,13 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
   };
 
   try {
-    if (mode === 'paper') releaseTradeAuthority = await acquireTradeAuthority('v5-paper');
+    releaseTradeAuthority = await (dependencies.acquireTradeAuthority ?? acquireTradeAuthority)(mode === 'paper' ? 'v5-paper' : 'v5-live');
     const snapshot = await broker.inspectCurrentState();
+    if (mode === 'live') await (dependencies.assertLiveAccount ?? assertLiveAccount)(snapshot.account, { baseUrl });
     if (mode === 'paper') await assertManualMarkerClear(snapshot, { readOrder: (entry) => entry.clientOrderId ? broker.getOrderByClientOrderId(entry.clientOrderId) : broker.getOrder(entry.orderId) });
+    else await (dependencies.assertLiveManualMarkerClear ?? assertLiveManualMarkerClear)();
     const paths = modeAccountPaths(mode, snapshot.account);
+    providers = (dependencies.createProviders ?? createAlpacaProviders)({ key: credentials.key ?? credentials.apiKey, secret: credentials.secret ?? credentials.apiSecret, baseUrl });
     connection = providers.connect({
       onRawTrade: (value) => onMessage('sip', value),
       onQuote: (value) => onMessage('opra', value),
@@ -102,7 +107,7 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
         await appendFile(paths.ledger, `${line}\n`);
       },
     });
-    runtime = createRuntime({ broker, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: mode === 'paper', ...(mode === 'paper' ? { strategyCapital: 500, entryQuantity: 1 } : {}), liquidateAt: untilClose ? close - 60_000 : null });
+    runtime = (dependencies.createRuntime ?? createRuntime)({ broker, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: true, strategyCapital: 500, entryQuantity: 1, liquidateAt: untilClose ? close - 60_000 : null });
     await runtime.start();
     ready = true;
     for (const [name, value] of pending.splice(0)) {

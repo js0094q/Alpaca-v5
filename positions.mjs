@@ -203,7 +203,13 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     const anchor = cents(trade.anchorBid);
     return entry === null || anchor === null ? null : Math.max(entry, anchor);
   };
-  const latch = (trade) => {
+  const latch = (trade, quote = trade.quote, acceptedAt = trade.quoteReceivedAtMs) => {
+    if (!trade.sellDecisionCaptured) {
+      trade.sellDecisionBid = finite(quote?.bid);
+      trade.sellDecisionTimestamp = quote?.timestamp ?? null;
+      trade.sellDecisionSetAtMs = Number.isFinite(acceptedAt) ? acceptedAt : null;
+      trade.sellDecisionCaptured = true;
+    }
     trade.sellLatched = true;
     trade.logicalSellId ||= `v5-sell-${randomUUID()}`;
     notify(trade);
@@ -232,7 +238,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
 
     const reference = referenceCents(trade);
     if (bid * 10 <= reference * 9) {
-      latch(trade);
+      latch(trade, quote, evaluatedAt);
       return;
     }
     if (anchorQuote) return;
@@ -247,7 +253,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       notify(trade);
     }
     if (floor !== null && bid < cents(trade.profitFloor)) {
-      latch(trade);
+      latch(trade, quote, evaluatedAt);
     }
   }
 
@@ -325,9 +331,18 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       contractSize: Number.isFinite(fill.contractSize) && fill.contractSize > 0 ? fill.contractSize : null,
       contractSizeSource: fill.contractSizeSource ?? null,
       fillTimestampMs,
+      entryClientOrderId: fill.entryClientOrderId ?? null,
+      entryOrderId: fill.entryOrderId ?? null,
+      entryDecisionAsk: finite(fill.entryDecisionAsk),
+      entryDecisionTimestamp: fill.entryDecisionTimestamp ?? null,
+      entryDecisionAt: fill.entryDecisionAt ?? null,
       anchorBid: null,
       anchorSetAtMs: null,
       anchorSourceTimestamp: null,
+      sellDecisionBid: null,
+      sellDecisionTimestamp: null,
+      sellDecisionSetAtMs: null,
+      sellDecisionCaptured: false,
       remainingQty: 1,
       profitFloor: null,
       sellLatched: false,
@@ -436,6 +451,12 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       symbol: trade.symbol,
       qty: quantity,
       price,
+      sellOrderId: update.orderId ?? null,
+      logicalSellId: trade.logicalSellId ?? null,
+      sellDecisionBid: finite(trade.sellDecisionBid),
+      sellDecisionTimestamp: trade.sellDecisionTimestamp ?? null,
+      sellDecisionSetAtMs: finite(trade.sellDecisionSetAtMs),
+      sellFillVsDecisionBid: finite(trade.sellDecisionBid) === null ? null : price - finite(trade.sellDecisionBid),
       entryPrice: trade.entryPrice,
       premiumPnlPerShare,
       contractSize: trade.contractSize,
@@ -461,6 +482,10 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       ...state,
       fillTimestampMs: Number.isFinite(fillTimestampMs) ? fillTimestampMs : undefined,
       anchorBid: state.anchorBid ?? null,
+      sellDecisionBid: state.sellDecisionBid ?? null,
+      sellDecisionTimestamp: state.sellDecisionTimestamp ?? null,
+      sellDecisionSetAtMs: state.sellDecisionSetAtMs ?? null,
+      sellDecisionCaptured: state.sellDecisionBid !== null && state.sellDecisionBid !== undefined,
       anchorSetAtMs: state.anchorSetAtMs ?? null,
       anchorSourceTimestamp: state.anchorSourceTimestamp ?? null,
       profitFloor: state.anchorBid == null ? null : state.profitFloor ?? null,
@@ -491,6 +516,8 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     const trade = {
       tradeId,
       executionId: 'recovery', symbol, entryPrice: null, remainingQty: Number(remainingQty), anchorBid: null, profitFloor: null,
+      sellDecisionBid: null, sellDecisionTimestamp: null, sellDecisionSetAtMs: null,
+      sellDecisionCaptured: false,
       sellLatched: true, logicalSellId: logicalSellId || `v5-sell-${randomUUID()}`, orderId, orderIds: new Set(orderId ? [orderId] : []), seenSellExecutions: new Set(),
       quote: null, lastSubmittedPrice: null, lastSubmittedQty: null, inFlight: false
     };
@@ -502,7 +529,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
 
   function liquidate() {
     for (const trade of trades.values()) {
-      if (trade.remainingQty > 0 && !trade.sellLatched) latch(trade, 'session_liquidation');
+      if (trade.remainingQty > 0 && !trade.sellLatched) latch(trade);
     }
   }
 

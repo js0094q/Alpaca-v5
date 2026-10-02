@@ -42,7 +42,12 @@ assert.throws(() => modeAccountPaths('sandbox', { id: 'a' }));
 assert.notEqual(modeAccountPaths('paper', { id: 'same' }).directory, modeAccountPaths('live', { id: 'same' }).directory);
 await assert.rejects(loadModeAccountPaths('live', { key: 'k', secret: 's' }, PAPER, async () => { throw new Error('must not request'); }), /do not match/);
 await assert.rejects(runPaper({}), /mode must be paper or live/);
-await assert.rejects(runPaper({ mode: 'live' }), /MODE_CREDENTIALS_REQUIRED/);
+let liveBrokerConstructed = false;
+await assert.rejects(runPaper({ mode: 'live', dependencies: {
+  loadModeCredentials: async () => { throw Object.assign(new Error('LIVE credentials are unavailable.'), { code: 'CREDENTIAL_UNAVAILABLE' }); },
+  createBroker: () => { liveBrokerConstructed = true; throw new Error('must not construct broker'); },
+} }), (error) => error.code === 'CREDENTIAL_UNAVAILABLE' && error.message === 'LIVE credentials are unavailable.');
+assert.equal(liveBrokerConstructed, false, 'missing mocked LIVE credentials fail before broker construction');
 await assert.rejects(localSnapshot('live'), /PAPER only/);
 
 const brokerUrls = [];

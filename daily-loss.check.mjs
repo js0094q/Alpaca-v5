@@ -219,10 +219,9 @@ try {
   assert.equal(fractional.getState().dailyLoss.tripped, true, '$10.04 loss trips at 10% of $100.40');
 } finally { fractional.stop(); }
 
-// PAPER wiring is explicit: production enables the daily-loss guard only for
-// PAPER mode, while generic/non-PAPER runtimes leave it disabled by default.
+// Production PAPER and LIVE sessions both enable the fail-closed daily-loss guard.
 const paperSource = readFileSync(new URL('./paper.mjs', import.meta.url), 'utf8');
-assert.match(paperSource, /dailyLossGuard:\s*mode\s*===\s*['"]paper['"]/);
+assert.match(paperSource, /dailyLossGuard:\s*true/);
 
 // Daily loss gates new entries only. An already-owned position keeps its SELL
 // order lifecycle while the trip is active.

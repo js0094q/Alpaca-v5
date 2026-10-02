@@ -9,7 +9,7 @@ const ambiguousMutationError = (error) => {
   return !Number.isInteger(status) || status >= 500 || [404, 408, 409, 429].includes(status) || /duplicate|already.*(?:exist|use)|must be unique/i.test(error?.message ?? '');
 };
 
-export function createEntry({ broker, getContracts, getQuote, onFill, onState, nowMono, canSubmit = () => true, quantity = 3, strategyCapital = null }) {
+export function createEntry({ broker, getContracts, getQuote, onFill, onState, now = () => Date.now(), nowMono, canSubmit = () => true, quantity = 3, strategyCapital = null }) {
   if (!Number.isInteger(quantity) || quantity <= 0) throw new TypeError('quantity must be a positive integer');
   if (strategyCapital !== null && (!Number.isFinite(strategyCapital) || strategyCapital <= 0)) throw new TypeError('strategyCapital must be positive');
   const QTY = quantity;
@@ -35,6 +35,9 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
   let cancelDue = false;
   let pendingMutation = null;
   let mutationGeneration = 0;
+  let decisionAsk = null;
+  let decisionTimestamp = null;
+  let decisionAt = null;
 
   const snapshot = () => ({
     orderId,
@@ -190,6 +193,13 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
         signalId,
         tradeSetId: clientOrderId,
         entrySetId: clientOrderId,
+        entryClientOrderId: clientOrderId,
+        entryOrderId: update.orderId ?? orderId ?? null,
+        // This is the initial submitted ask and stays fixed across replacements.
+        entryDecisionAsk: decisionAsk,
+        entryDecisionTimestamp: decisionTimestamp,
+        entryDecisionAt: decisionAt,
+        entryFillVsDecisionAsk: decisionAsk === null ? null : update.fillPrice - decisionAsk,
         actionSource: 'V5_AUTO',
         symbol: contract.symbol,
         entryPrice: update.fillPrice,
@@ -211,6 +221,10 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
     submittedAt = nowMono();
     deadline = submittedAt + NO_FILL_MS;
     clientOrderId = `v5-buy-${randomUUID()}`;
+    decisionAsk = limitPrice;
+    decisionTimestamp = quote?.timestamp ?? null;
+    const decisionWallTime = Number(now());
+    decisionAt = Number.isFinite(decisionWallTime) ? new Date(decisionWallTime).toISOString() : null;
     const submittedClientOrderId = clientOrderId;
     const generation = ++mutationGeneration;
     emit();
@@ -426,6 +440,7 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
         state = 'IDLE'; pausedReason = null; orderId = null; orderStatus = null; filled = 0; deadline = null;
         action = null; clientOrderId = null; knownOrderIds = new Set(); seenExecutions = new Set(); cancelDue = false;
         breakout = null; contract = null; quote = null; cap = null; spreadCap = null; terminalObserved = false;
+        decisionAsk = null; decisionTimestamp = null; decisionAt = null;
         emit();
       }
     },

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { loadModeCredentials } from '../paper-account.mjs';
 
 export const PAPER_ACCOUNT_ID = '94c3c77c-bf58-4dbb-ac57-5a9b9e41c40b';
 const credentialValues = new Set();
@@ -26,6 +27,17 @@ export async function resolvePaper({ readFileImpl = readFile } = {}) {
   credentialValues.add(key);
   credentialValues.add(secret);
   return Object.freeze({ mode: 'paper', baseUrl: 'https://paper-api.alpaca.markets', dataUrl: 'https://data.alpaca.markets', apiKey: key, apiSecret: secret });
+}
+
+export async function resolveMode(mode, { readFileImpl = readFile } = {}) {
+  if (mode === 'paper') return resolvePaper({ readFileImpl });
+  if (mode !== 'live') throw new TypeError('mode must be paper or live');
+  let credentials;
+  try { credentials = await loadModeCredentials('live', { readFileImpl }); }
+  catch { throw Object.assign(new Error('LIVE credentials are unavailable or invalid.'), { code: 'CREDENTIAL_UNAVAILABLE' }); }
+  credentialValues.add(credentials.key);
+  credentialValues.add(credentials.secret);
+  return Object.freeze({ mode: 'live', baseUrl: 'https://api.alpaca.markets', dataUrl: 'https://data.alpaca.markets', apiKey: credentials.key, apiSecret: credentials.secret });
 }
 
 export function redact(value) {

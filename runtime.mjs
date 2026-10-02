@@ -172,7 +172,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     }
   }, onState: (s) => { if (!hydrating) continuity.save(positions.getTrades()); if (s?.state) setState(s.state, s); }, now, nowMono });
   let entry;
-  entry = createEntry({ broker, quantity: entryQuantity, strategyCapital, canSubmit: () => { const current = now(), session = calendar.sessionFor(current); return canEnterDailyLoss() && (stopAtMs === null || current < stopAtMs) && session?.status === 'open' && session.date === sessionDate && entryCutoffMinutes(current) < buyCutoffMinuteET && (!session.cutoff || current < Date.parse(session.cutoff)); }, getContracts, getQuote, nowMono, onFill: (fill) => {
+  entry = createEntry({ broker, quantity: entryQuantity, strategyCapital, canSubmit: () => { const current = now(), session = calendar.sessionFor(current); return canEnterDailyLoss() && (stopAtMs === null || current < stopAtMs) && session?.status === 'open' && session.date === sessionDate && entryCutoffMinutes(current) < buyCutoffMinuteET && (!session.cutoff || current < Date.parse(session.cutoff)); }, getContracts, getQuote, now, nowMono, onFill: (fill) => {
     safeLedger('FILL', fill);
     const priceCents = cents(fill.entryPrice);
     if (fill.tradeSetId && priceCents !== null) {

@@ -206,8 +206,8 @@ for (const [label, loss, expected] of [['below', -49.99, false], ['exact', -50, 
 }
 
 const paperSource = readFileSync(new URL('./paper.mjs', import.meta.url), 'utf8');
-assert.match(paperSource, /dailyLossGuard:\s*mode\s*===\s*['"]paper['"]/);
-assert.match(paperSource, /\.\.\.\(mode\s*===\s*['"]paper['"]\s*\?\s*\{\s*strategyCapital:\s*500,\s*entryQuantity:\s*1\s*\}\s*:\s*\{\}\)/,
-  'the $500 capital and one-contract size are enabled only in PAPER mode');
+assert.match(paperSource, /dailyLossGuard:\s*true/);
+assert.match(paperSource, /strategyCapital:\s*500,\s*entryQuantity:\s*1/,
+  'the $500 capital and one-contract size are enabled for guarded PAPER and LIVE sessions');
 
 console.log('sizing.check ok');
