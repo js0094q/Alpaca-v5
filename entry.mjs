@@ -24,7 +24,6 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
   let submittedAt = null;
   let deadline = null;
   let filled = 0;
-  let clientSeq = 0;
   let action = null;
   let pausedReason = null;
   let spreadCap = null;

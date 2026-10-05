@@ -63,7 +63,6 @@ const boundedText = async (path, maxBytes) => {
   } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 };
 
-const tailLines = (text, limit = 100) => String(text ?? '').split(/\r?\n/).filter(Boolean).slice(-limit);
 const boundedLines = (text, limit = MAX_RESULTS) => {
   const lines = String(text ?? '').split(/\r?\n/).filter(Boolean);
   return { events: lines.slice(-limit), truncated: lines.length > limit };
