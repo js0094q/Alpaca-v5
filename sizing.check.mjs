@@ -12,7 +12,7 @@ const date = '2026-09-23';
 const session = (day = date) => ({ date: day, status: 'open', open: `${day}T13:30:00Z`, close: `${day}T20:00:00Z` });
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-function entryHarness({ quantity = 1, strategyCapital = 500, contracts, quotes, onFill = () => {} }) {
+function entryHarness({ quantity = 1, strategyCapital = 481.63, contracts, quotes, onFill = () => {} }) {
   const calls = [];
   const quoteCalls = [];
   const broker = {
@@ -36,12 +36,12 @@ const contracts = [
 
 // The frozen midpoint-plus-three-cent cap permits exact budget equality.
 {
-  const { entry, calls } = entryHarness({ contracts: [contracts[0]], quotes: { ATM: { bid: 4.97, ask: 4.97 } } });
+  const { entry, calls } = entryHarness({ strategyCapital: 480.5, contracts: [contracts[0]], quotes: { ATM: { bid: 4.77, ask: 4.78 } } });
   await entry.onBreakout({ direction: 'CALL', timestamp: 1, spyPrice: 100 });
   assert.equal(calls.filter((x) => x.kind === 'submit').length, 1);
   assert.equal(calls[0].qty, 1);
-  assert.equal(calls[0].limitPrice, 4.97);
-  assert.equal(entry.getState().cap, 5);
+  assert.equal(calls[0].limitPrice, 4.78);
+  assert.ok(Math.abs(entry.getState().cap - 4.805) < 1e-9);
 }
 
 // If the selected ATM contract exceeds the strategy budget, do not search for
@@ -59,33 +59,33 @@ const contracts = [
 // one-contract entry is owned, another breakout cannot create another order.
 {
   const fills = [];
-  let currentQuote = { bid: 4.8, ask: 4.82 };
+  let currentQuote = { bid: 4.76, ask: 4.78 };
   const broker = {
     calls: [],
     async submitOrder(order) { this.calls.push({ kind: 'submit', ...order }); return { id: 'owned-buy', status: 'accepted' }; },
     async replaceOrder(id, order) { this.calls.push({ kind: 'replace', id, ...order }); return { id: 'owned-buy-r', status: 'accepted' }; },
     async cancelOrder(id) { this.calls.push({ kind: 'cancel', id }); },
   };
-  const entry = createEntry({ broker, quantity: 1, strategyCapital: 500,
+  const entry = createEntry({ broker, quantity: 1, strategyCapital: 481.63,
     getContracts: async () => contracts,
     getQuote: async () => currentQuote,
     onFill: (fill) => fills.push(fill), onState: () => {}, nowMono: () => 0,
   });
   await entry.onBreakout({ direction: 'CALL', timestamp: 3, spyPrice: 100 });
   const frozenCap = entry.getState().cap;
-  currentQuote = { bid: 4.82, ask: 4.84 };
+  currentQuote = { bid: 4.78, ask: 4.80 };
   entry.tick();
   await flush();
   assert.equal(entry.getState().cap, frozenCap);
   assert.equal(broker.calls.filter((x) => x.kind === 'replace').length, 1, 'repricing up to the frozen cap is allowed');
   assert.ok(Math.abs(broker.calls.find((x) => x.kind === 'replace').limitPrice - frozenCap) < 1e-9);
-  currentQuote = { bid: 4.83, ask: 4.85 };
+  currentQuote = { bid: 4.79, ask: 4.81 };
   entry.tick();
   await flush();
   assert.equal(broker.calls.filter((x) => x.kind === 'replace').length, 1, 'repricing above the frozen cap is refused');
   const clientOrderId = entry.getState().clientOrderId;
   entry.onOrderUpdate({ event: 'fill', side: 'buy', clientOrderId, orderId: 'owned-buy', executionId: 'one-fill',
-    fillQty: 1, fillPrice: 4.82, timestamp: '2026-09-23T14:00:00Z' });
+    fillQty: 1, fillPrice: 4.78, timestamp: '2026-09-23T14:00:00Z' });
   assert.equal(fills.length, 1);
   assert.equal(entry.getState().filled, 1);
   await entry.onBreakout({ direction: 'CALL', timestamp: 4, spyPrice: 100 });
@@ -93,9 +93,9 @@ const contracts = [
 }
 
 function runtimeHarness({ continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-')), 'state.json') }),
-  broker, day = date, strategyCapital = 500, dailyLossGuard = true, entryQuantity = 1,
+  broker, day = date, strategyCapital = 481.63, dailyLossGuard = true, entryQuantity = 1, ledger = () => {},
   clock = { wall: Date.parse(`${day}T14:00:00Z`), mono: 0 } } = {}) {
-  return createRuntime({ broker, continuity, strategyCapital, entryQuantity, dailyLossGuard,
+  return createRuntime({ broker, continuity, strategyCapital, entryQuantity, dailyLossGuard, ledger,
     now: () => clock.wall, nowMono: () => clock.mono,
     calendar: { sessionFor: () => session(day) },
     getContracts: async () => [{ symbol, strike: 660 }],
@@ -122,7 +122,7 @@ async function breakout(runtime, prefix) {
 }
 
 // The PAPER runtime's one-contract quantity reaches a completed BUY/SELL set;
-// the realized contract loss is recorded once and stays below the $50 guard.
+// the realized contract loss is recorded once and stays below the $48.16 guard.
 {
   const continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-cycle-')), 'state.json') });
   const broker = brokerState();
@@ -159,19 +159,19 @@ async function breakout(runtime, prefix) {
   } finally { runtime.stop(); }
 }
 
-// A completed one-contract loss at exactly 10% of $500 trips the guard;
+// A completed one-contract loss at the rounded 10% of $481.63 trips the guard;
 // just below remains available and just above is also sticky.
-for (const [label, loss, expected] of [['below', -49.99, false], ['exact', -50, true], ['above', -50.01, true]]) {
+for (const [label, loss, expected] of [['below', -48.15, false], ['exact', -48.16, true], ['above', -48.17, true]]) {
   const continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-loss-')), 'state.json') });
   continuity.save([], { pause: null, sets: [{ tradeSetId: `set-${label}`, date, known: true,
     entryQty: 1, entryCentQty: 100, exitQty: 1, exitCentQty: 100 + loss,
     entryTerminal: true, closedAt: Date.parse(`${date}T13:59:00Z`) }],
-    dailyLoss: { date, dayStartEquity: 500, cumulativeRealizedGross: 0, tripped: false, completedBuyIds: [] } });
+    dailyLoss: { date, dayStartEquity: 481.63, cumulativeRealizedGross: 0, tripped: false, completedBuyIds: [] } });
   const broker = brokerState();
   const runtime = runtimeHarness({ continuity, broker });
   try {
     await runtime.startup();
-    assert.equal(runtime.getState().dailyLoss.dayStartEquity, 500);
+    assert.equal(runtime.getState().dailyLoss.dayStartEquity, 481.63);
     assert.equal(runtime.getState().dailyLoss.cumulativeRealizedGross, loss);
     assert.equal(runtime.getState().dailyLoss.tripped, expected, `${label} threshold result`);
     assert.deepEqual(runtime.getState().dailyLoss.completedBuyIds, [`set-${label}`]);
@@ -191,23 +191,25 @@ for (const [label, loss, expected] of [['below', -49.99, false], ['exact', -50, 
   } finally { runtime.stop(); }
 }
 
-// A new day starts a fresh $500 baseline and clears yesterday's trip.
+// A new day starts a fresh $481.63 baseline and clears yesterday's trip.
 {
   const continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-nextday-')), 'state.json') });
   continuity.save([], { pause: null, sets: [], dailyLoss: { date, dayStartEquity: 9_744.81,
     cumulativeRealizedGross: -20, tripped: true, completedBuyIds: ['old-buy'] } });
   const tomorrow = '2026-09-24';
-  const runtime = runtimeHarness({ continuity, day: tomorrow, broker: brokerState({ equity: 9_744.81 }) });
+  const dayStartLedger = [];
+  const runtime = runtimeHarness({ continuity, day: tomorrow, broker: brokerState({ equity: 9_744.81 }), ledger: (record) => dayStartLedger.push(record) });
   try {
     await runtime.startup();
-    assert.deepEqual(runtime.getState().dailyLoss, { date: tomorrow, dayStartEquity: 500,
+    assert.deepEqual(runtime.getState().dailyLoss, { date: tomorrow, dayStartEquity: 481.63,
       cumulativeRealizedGross: 0, peakRealizedGross: 0, tripped: false, completedBuyIds: [] });
+    assert.ok(Math.abs(dayStartLedger.find((record) => record.event === 'DAY_START_EQUITY').dailyMaxLoss - 48.163) < 1e-9);
   } finally { runtime.stop(); }
 }
 
 const paperSource = readFileSync(new URL('./paper.mjs', import.meta.url), 'utf8');
 assert.match(paperSource, /dailyLossGuard:\s*true/);
-assert.match(paperSource, /strategyCapital:\s*500,\s*entryQuantity:\s*1/,
-  'the $500 capital and one-contract size are enabled for guarded PAPER and LIVE sessions');
+assert.match(paperSource, /strategyCapital:\s*481\.63,\s*entryQuantity:\s*1/,
+  'the $481.63 capital and one-contract size are enabled for guarded PAPER and LIVE sessions');
 
 console.log('sizing.check ok');

@@ -116,7 +116,7 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
     });
     // ponytail: append-only per-ET-day jsonl of OPRA quotes + exit decisions; no retention policy, prune by hand if the account dir grows.
     const telemetry = (event) => { mkdir(paths.directory, { recursive: true }).then(() => appendFile(join(paths.directory, `telemetry-${dateInET(event.at)}.jsonl`), `${JSON.stringify(event)}\n`)).catch(() => {}); };
-    runtime = (dependencies.createRuntime ?? createRuntime)({ broker, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, telemetry, breakoutMarginCents: 2, breakoutRangeFraction: 0.2, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: true, strategyCapital: 500, entryQuantity: 1, liquidateAt: untilClose ? close - 60_000 : liquidateAt });
+    runtime = (dependencies.createRuntime ?? createRuntime)({ broker, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, telemetry, breakoutMarginCents: 2, breakoutRangeFraction: 0.2, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: true, strategyCapital: 481.63, entryQuantity: 1, liquidateAt: untilClose ? close - 60_000 : liquidateAt });
     await runtime.start();
     ready = true;
     for (const [name, value] of pending.splice(0)) {
