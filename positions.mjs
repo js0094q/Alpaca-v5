@@ -27,7 +27,9 @@ const ambiguousMutationError = (error) => {
   return !Number.isInteger(status) || status >= 500 || [404, 408, 409, 429].includes(status) || /duplicate|already.*(?:exist|use)|must be unique/i.test(error?.message ?? '');
 };
 
-export function createPositions({ broker, onExit = () => {}, onExecutionIssue = () => {}, onState = () => {}, now = () => Date.now(), nowMono = () => Date.now() }) {
+export function createPositions({ broker, onExit = () => {}, onExecutionIssue = () => {}, onState = () => {}, onTelemetry = () => {}, now = () => Date.now(), nowMono = () => Date.now() }) {
+  const telemetry = (type, fields) => { try { onTelemetry({ type, at: new Date(Number(now())).toISOString(), ...fields }); } catch {} };
+  const decision = (kind, trade, quote, bid) => telemetry('decision', { kind, tradeId: trade.tradeId, symbol: trade.symbol, bid: bid / 100, ask: finite(quote?.ask), quoteTimestamp: quote?.timestamp ?? null, entryPrice: trade.entryPrice, anchorBid: trade.anchorBid, profitFloor: trade.profitFloor });
   const trades = new Map();
   const orders = new Map();
   const latestQuotes = new Map();
@@ -234,10 +236,12 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       trade.anchorSourceTimestamp = quote.timestamp ?? null;
       anchorQuote = true;
       notify(trade);
+      decision('anchor_set', trade, quote, bid);
     }
 
     const reference = referenceCents(trade);
     if (bid * 10 <= reference * 9) {
+      decision('stop_latch', trade, quote, bid);
       latch(trade, quote, evaluatedAt);
       return;
     }
@@ -246,13 +250,16 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     if (floor === null && bid >= reference + 2) {
       trade.profitFloor = (bid - 4) / 100;
       notify(trade);
+      decision('floor_set', trade, quote, bid);
       return;
     }
     if (floor !== null && bid - 4 > floor) {
       trade.profitFloor = (bid - 4) / 100;
       notify(trade);
+      decision('floor_raise', trade, quote, bid);
     }
     if (floor !== null && bid < cents(trade.profitFloor)) {
+      decision('floor_latch', trade, quote, bid);
       latch(trade, quote, evaluatedAt);
     }
   }
@@ -373,6 +380,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     const acceptedAt = Number(now());
     const acceptedQuote = { quote: { ...quote }, acceptedAt: Number.isFinite(acceptedAt) ? acceptedAt : null, acceptedMono: performance.now() };
     latestQuotes.set(quote.symbol, acceptedQuote);
+    telemetry('quote', { symbol: quote.symbol, bid: Number(quote.bid), ask: finite(quote.ask), quoteTimestamp: quote.timestamp ?? null });
     for (const trade of trades.values()) {
       if (trade.symbol !== quote.symbol || trade.remainingQty <= 0) continue;
       trade.quote = { ...acceptedQuote.quote };

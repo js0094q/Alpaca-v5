@@ -40,8 +40,10 @@ const localMinutes = (ms) => {
   return hour * 60 + Number(parts.find(({ type }) => type === 'minute').value);
 };
 
-export function createSignal({ onBreakout, entryCutoffMinuteET = ENTRY_CUTOFF_MINUTE_ET } = {}) {
+export function createSignal({ onBreakout, entryCutoffMinuteET = ENTRY_CUTOFF_MINUTE_ET, breakoutMarginCents = 0, breakoutRangeFraction = 0 } = {}) {
   if (!Number.isInteger(entryCutoffMinuteET) || entryCutoffMinuteET < 0 || entryCutoffMinuteET >= 24 * 60) throw new RangeError('entryCutoffMinuteET must be an integer minute of day');
+  if (!Number.isFinite(breakoutMarginCents) || breakoutMarginCents < 0) throw new RangeError('breakoutMarginCents must be a non-negative number');
+  if (!Number.isFinite(breakoutRangeFraction) || breakoutRangeFraction < 0 || breakoutRangeFraction >= 1) throw new RangeError('breakoutRangeFraction must be in [0, 1)');
   if (typeof onBreakout !== 'function') throw new TypeError('onBreakout must be a function');
   const buyCutoffMinuteET = Math.min(entryCutoffMinuteET, 15 * 60 + 30);
 
@@ -92,10 +94,13 @@ export function createSignal({ onBreakout, entryCutoffMinuteET = ENTRY_CUTOFF_MI
     trades.push({ timestamp, ms: tradeMs, key: parsed.key, price, tradeId, exchange, tape, receipt });
     if (latestSourceKey === null || parsed.key > latestSourceKey) latestSourceKey = parsed.key;
 
-    const direction = hasPriorTrade && price > high ? 'CALL' : hasPriorTrade && price < low ? 'PUT' : null;
+    // Breakout must clear the 30s range by max(fixed cents, fraction of that range); both zero keeps the strict price > high rule.
+    const margin = hasPriorTrade ? Math.max(breakoutMarginCents / 100, breakoutRangeFraction * (high - low)) : 0;
+    const clears = (excess) => margin > 0 ? excess >= margin - 1e-9 : excess > 0;
+    const direction = !hasPriorTrade ? null : clears(price - high) ? 'CALL' : clears(low - price) ? 'PUT' : null;
     if (now < warmupUntil || now < session.openMs + ENTRY_DELAY_MS || tradeMs < session.openMs + ENTRY_DELAY_MS) return { accepted: true };
-    if (hasPriorTrade && price > high) onBreakout({ direction: 'CALL', timestamp, spyPrice: price, sourceTradeId: tradeId, receivedAt: now, priorHigh: high, priorLow: low, priorCount: priorTrades.length });
-    else if (hasPriorTrade && price < low) onBreakout({ direction: 'PUT', timestamp, spyPrice: price, sourceTradeId: tradeId, receivedAt: now, priorHigh: high, priorLow: low, priorCount: priorTrades.length });
+    if (direction) onBreakout({ direction, timestamp, spyPrice: price, sourceTradeId: tradeId, receivedAt: now, priorHigh: high, priorLow: low, priorCount: priorTrades.length,
+      excessCents: Math.round((direction === 'CALL' ? price - high : low - price) * 10_000) / 100, rangeCents: Math.round((high - low) * 10_000) / 100, marginCents: Math.round(margin * 10_000) / 100 });
     return { accepted: true };
   };
 

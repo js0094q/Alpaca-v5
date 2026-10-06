@@ -2,6 +2,7 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import { createAlpacaBroker } from './alpaca.mjs';
 import { createAlpacaProviders } from './providers.mjs';
 import { createRuntime } from './runtime.mjs';
+import { join } from 'node:path';
 import { createLedger } from './ledger.mjs';
 import { createContinuity } from './continuity.mjs';
 import { loadModeCredentials, assertLiveAccount, loadCloseoutCredentials, PAPER_ENV, modeAccountPaths } from './paper-account.mjs';
@@ -113,7 +114,9 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
         await appendFile(paths.ledger, `${line}\n`);
       },
     });
-    runtime = (dependencies.createRuntime ?? createRuntime)({ broker, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: true, strategyCapital: 500, entryQuantity: 1, liquidateAt: untilClose ? close - 60_000 : liquidateAt });
+    // ponytail: append-only per-ET-day jsonl of OPRA quotes + exit decisions; no retention policy, prune by hand if the account dir grows.
+    const telemetry = (event) => { mkdir(paths.directory, { recursive: true }).then(() => appendFile(join(paths.directory, `telemetry-${dateInET(event.at)}.jsonl`), `${JSON.stringify(event)}\n`)).catch(() => {}); };
+    runtime = (dependencies.createRuntime ?? createRuntime)({ broker, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, telemetry, breakoutMarginCents: 2, breakoutRangeFraction: 0.2, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: true, strategyCapital: 500, entryQuantity: 1, liquidateAt: untilClose ? close - 60_000 : liquidateAt });
     await runtime.start();
     ready = true;
     for (const [name, value] of pending.splice(0)) {

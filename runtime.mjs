@@ -17,7 +17,7 @@ const entryCutoffMinutes = (value) => {
   return hour * 60 + minute;
 };
 
-export function createRuntime({ broker, getContracts, getQuote, calendar, now = () => Date.now(), nowMono = () => performance.now(), ledger = () => {}, continuity = createContinuity(), dailyLossGuard = false, strategyCapital = null, entryQuantity = 3, liquidateAt = null, entryCutoffMinuteET = 15 * 60 + 30, stopAtMs = null }) {
+export function createRuntime({ broker, getContracts, getQuote, calendar, now = () => Date.now(), nowMono = () => performance.now(), ledger = () => {}, telemetry = () => {}, breakoutMarginCents = 0, breakoutRangeFraction = 0, continuity = createContinuity(), dailyLossGuard = false, strategyCapital = null, entryQuantity = 3, liquidateAt = null, entryCutoffMinuteET = 15 * 60 + 30, stopAtMs = null }) {
   if (!broker || !getContracts || !getQuote || !calendar) throw new TypeError('broker, contract, quote, and calendar inputs are required');
   if (stopAtMs !== null && !Number.isFinite(stopAtMs)) throw new TypeError('stopAtMs must be a finite timestamp');
   if (liquidateAt !== null && !Number.isFinite(liquidateAt)) throw new TypeError('liquidateAt must be a finite timestamp');
@@ -160,7 +160,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     safeLedger('DAY_START', { date: session.date, ledgerId: `v5-day-${session.date}`, ...(dailyLoss?.date === session.date ? { dayStartEquity: dailyLoss.dayStartEquity, dailyMaxLoss: dailyLoss.dayStartEquity * DAILY_MAX_LOSS_RATE } : {}) });
   };
 
-  const positions = createPositions({ broker, onExit, onExecutionIssue: (issue) => {
+  const positions = createPositions({ broker, onExit, onTelemetry: telemetry, onExecutionIssue: (issue) => {
     if (issue.resolved) {
       const index = executionIssues.findIndex((prior) => prior.reason === issue.reason && prior.orderId === issue.orderId && prior.tradeId === issue.tradeId);
       if (index >= 0) executionIssues.splice(index, 1);
@@ -188,7 +188,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     positions.onFill(fill);
     persistContinuity();
   }, onState: (s) => { entryState = s; recordEntryState(); const status = s?.status ?? s?.state; if (['IDLE', 'DONE', 'canceled', 'rejected', 'expired'].includes(status) && !hasOwnership() && cancelingBuys.size === 0) { if (state !== 'COOLDOWN') { entry.ready?.(); setState('FLAT'); } } scheduleDeadline(); } });
-  const signal = createSignal({ onBreakout, entryCutoffMinuteET });
+  const signal = createSignal({ onBreakout, entryCutoffMinuteET, breakoutMarginCents, breakoutRangeFraction });
   const sip = createSipProcessor({ onTrade: (trade, receivedAt) => signal.onTrade(trade, receivedAt), onCorrection: (change, receivedAt) => signal.onCorrection(change, receivedAt), onCancel: (change, receivedAt) => signal.onCancel(change, receivedAt) });
 
   async function startup() {
