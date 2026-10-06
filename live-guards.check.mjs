@@ -69,7 +69,7 @@ try {
     'marker', 'provider-connect', 'runtime-created', 'runtime-start', 'runtime-stop', 'release',
   ]);
   assert.equal(runtimeOptions.dailyLossGuard, true);
-  assert.equal(runtimeOptions.strategyCapital, 481.63);
+  assert.equal(runtimeOptions.strategyCapital, 460.45);
   assert.equal(runtimeOptions.entryQuantity, 1);
 
   const rejectedCalls = [];

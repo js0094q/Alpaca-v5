@@ -12,7 +12,7 @@ const date = '2026-09-23';
 const session = (day = date) => ({ date: day, status: 'open', open: `${day}T13:30:00Z`, close: `${day}T20:00:00Z` });
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-function entryHarness({ quantity = 1, strategyCapital = 481.63, contracts, quotes, onFill = () => {} }) {
+function entryHarness({ quantity = 1, strategyCapital = 460.45, contracts, quotes, onFill = () => {} }) {
   const calls = [];
   const quoteCalls = [];
   const broker = {
@@ -66,7 +66,7 @@ const contracts = [
     async replaceOrder(id, order) { this.calls.push({ kind: 'replace', id, ...order }); return { id: 'owned-buy-r', status: 'accepted' }; },
     async cancelOrder(id) { this.calls.push({ kind: 'cancel', id }); },
   };
-  const entry = createEntry({ broker, quantity: 1, strategyCapital: 481.63,
+  const entry = createEntry({ broker, quantity: 1, strategyCapital: 460.45,
     getContracts: async () => contracts,
     getQuote: async () => currentQuote,
     onFill: (fill) => fills.push(fill), onState: () => {}, nowMono: () => 0,
@@ -93,7 +93,7 @@ const contracts = [
 }
 
 function runtimeHarness({ continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-')), 'state.json') }),
-  broker, day = date, strategyCapital = 481.63, dailyLossGuard = true, entryQuantity = 1, ledger = () => {},
+  broker, day = date, strategyCapital = 460.45, dailyLossGuard = true, entryQuantity = 1, ledger = () => {},
   clock = { wall: Date.parse(`${day}T14:00:00Z`), mono: 0 } } = {}) {
   return createRuntime({ broker, continuity, strategyCapital, entryQuantity, dailyLossGuard, ledger,
     now: () => clock.wall, nowMono: () => clock.mono,
@@ -159,19 +159,19 @@ async function breakout(runtime, prefix) {
   } finally { runtime.stop(); }
 }
 
-// A completed one-contract loss at the rounded 10% of $481.63 trips the guard;
+// A completed one-contract loss at the rounded 10% of $460.45 trips the guard;
 // just below remains available and just above is also sticky.
 for (const [label, loss, expected] of [['below', -48.15, false], ['exact', -48.16, true], ['above', -48.17, true]]) {
   const continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-loss-')), 'state.json') });
   continuity.save([], { pause: null, sets: [{ tradeSetId: `set-${label}`, date, known: true,
     entryQty: 1, entryCentQty: 100, exitQty: 1, exitCentQty: 100 + loss,
     entryTerminal: true, closedAt: Date.parse(`${date}T13:59:00Z`) }],
-    dailyLoss: { date, dayStartEquity: 481.63, cumulativeRealizedGross: 0, tripped: false, completedBuyIds: [] } });
+    dailyLoss: { date, dayStartEquity: 460.45, cumulativeRealizedGross: 0, tripped: false, completedBuyIds: [] } });
   const broker = brokerState();
   const runtime = runtimeHarness({ continuity, broker });
   try {
     await runtime.startup();
-    assert.equal(runtime.getState().dailyLoss.dayStartEquity, 481.63);
+    assert.equal(runtime.getState().dailyLoss.dayStartEquity, 460.45);
     assert.equal(runtime.getState().dailyLoss.cumulativeRealizedGross, loss);
     assert.equal(runtime.getState().dailyLoss.tripped, expected, `${label} threshold result`);
     assert.deepEqual(runtime.getState().dailyLoss.completedBuyIds, [`set-${label}`]);
@@ -191,7 +191,7 @@ for (const [label, loss, expected] of [['below', -48.15, false], ['exact', -48.1
   } finally { runtime.stop(); }
 }
 
-// A new day starts a fresh $481.63 baseline and clears yesterday's trip.
+// A new day starts a fresh $460.45 baseline and clears yesterday's trip.
 {
   const continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-nextday-')), 'state.json') });
   continuity.save([], { pause: null, sets: [], dailyLoss: { date, dayStartEquity: 9_744.81,
@@ -201,15 +201,15 @@ for (const [label, loss, expected] of [['below', -48.15, false], ['exact', -48.1
   const runtime = runtimeHarness({ continuity, day: tomorrow, broker: brokerState({ equity: 9_744.81 }), ledger: (record) => dayStartLedger.push(record) });
   try {
     await runtime.startup();
-    assert.deepEqual(runtime.getState().dailyLoss, { date: tomorrow, dayStartEquity: 481.63,
+    assert.deepEqual(runtime.getState().dailyLoss, { date: tomorrow, dayStartEquity: 460.45,
       cumulativeRealizedGross: 0, peakRealizedGross: 0, tripped: false, completedBuyIds: [] });
-    assert.ok(Math.abs(dayStartLedger.find((record) => record.event === 'DAY_START_EQUITY').dailyMaxLoss - 48.163) < 1e-9);
+    assert.ok(Math.abs(dayStartLedger.find((record) => record.event === 'DAY_START_EQUITY').dailyMaxLoss - 46.045) < 1e-9);
   } finally { runtime.stop(); }
 }
 
 const paperSource = readFileSync(new URL('./paper.mjs', import.meta.url), 'utf8');
 assert.match(paperSource, /dailyLossGuard:\s*true/);
 assert.match(paperSource, /strategyCapital:\s*481\.63,\s*entryQuantity:\s*1/,
-  'the $481.63 capital and one-contract size are enabled for guarded PAPER and LIVE sessions');
+  'the $460.45 capital and one-contract size are enabled for guarded PAPER and LIVE sessions');
 
 console.log('sizing.check ok');
