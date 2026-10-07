@@ -41,6 +41,8 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
   let deadlineTimer;
   let ownershipScan;
   let nextOwnershipScanAt = 0;
+  let nextStatusAt = -Infinity;
+  const sipObservation = { messages: 0, rejected: 0, lastMessageAt: null, lastRejectedReason: null };
   const cancelingBuys = new Set();
   const executionIssues = [];
   const safeLedger = (event, data = {}) => {
@@ -389,6 +391,9 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
   function onTrade(trade, receivedAt = now()) { return signal.onTrade(trade, receivedAt); }
   function onRawTrade(raw, receivedAt = now()) {
     const result = sip.onRawTrade(raw, receivedAt);
+    sipObservation.messages++;
+    sipObservation.lastMessageAt = new Date(receivedAt).toISOString();
+    if (result?.accepted === false) { sipObservation.rejected++; sipObservation.lastRejectedReason = result.reason; }
     return result;
   }
   function onMarketDataStatus(status) { return signal.onMarketDataStatus(status); }
@@ -425,6 +430,43 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     if (Number.isFinite(deadline) && deadline > nowMono()) deadlineTimer = setTimeout(() => { deadlineTimer = undefined; entry.tick(); scheduleDeadline(); }, deadline - nowMono());
   }
 
+  function emitStatus(current, session) {
+    if (nowMono() < nextStatusAt) return;
+    nextStatusAt = nowMono() + FIVE_SECONDS;
+    try {
+      const signalStatus = signal.getStatus(current);
+      const blockers = [];
+      if (signalStatus.entryBlocker) blockers.push(signalStatus.entryBlocker);
+      if (session?.status !== 'open') blockers.push('MARKET_CLOSED');
+      if (localMinutes(current) >= buyCutoffMinuteET || (session?.cutoff && current >= Date.parse(session.cutoff))) blockers.push('ENTRY_CUTOFF');
+      if (stopAtMs !== null && current >= stopAtMs) blockers.push('ENTRIES_STOPPED');
+      if (filledEntryStateUnavailable) blockers.push('ENTRY_HISTORY_UNAVAILABLE');
+      if (filledEntryDate === sessionDate && sessionDate !== null) blockers.push('DAILY_ENTRY_USED');
+      if (dailyLossGuard && (dailyLossStateUnavailable || !dailyLoss || dailyLoss.date !== sessionDate)) blockers.push('DAILY_GUARD_UNAVAILABLE');
+      if (dailyLoss?.tripped) blockers.push('DAILY_LOSS_LIMIT');
+      if (cancelingBuys.size) blockers.push('BUY_CANCEL_PENDING');
+      if (nowMono() < cooldownUntil) blockers.push('COOLDOWN');
+      if (state !== 'FLAT') blockers.push(state);
+      if (entryActive()) blockers.push('ENTRY_IN_PROGRESS');
+      const selected = entry.getState();
+      const event = {
+        type: 'runtime_status', at: new Date(current).toISOString(), date: sessionDate, state,
+        entryEligible: started && !blockers.length && signalStatus.entryEligible,
+        blockers, signal: signalStatus, sip: { ...sipObservation,
+          lastMessageAgeMs: sipObservation.lastMessageAt === null ? null : current - Date.parse(sipObservation.lastMessageAt) },
+        entry: { state: selected.state, reason: selected.reason ?? null, symbol: selected.contract?.symbol ?? null,
+          signalAt: selected.breakout?.timestamp ?? null, direction: selected.breakout?.direction ?? null,
+          bid: selected.quote?.bid ?? null, ask: selected.quote?.ask ?? null,
+          frozenCap: selected.cap, orderId: selected.orderId },
+        filledEntryDate, realizedPnlUsd: dailyLoss?.cumulativeRealizedGross ?? null,
+        held: trades().filter((t) => t.remainingQty > 0).map((t) => ({ symbol: t.symbol, qty: t.remainingQty,
+          entryPrice: t.entryPrice, mfeCents: t.mfeCents, maeCents: t.maeCents, reconciling: t.reconciling,
+          sellLatched: t.sellLatched, externalSellOpen: externalSellSymbols.has(t.symbol) })),
+      };
+      Promise.resolve(telemetry(event)).catch(() => {});
+    } catch {}
+  }
+
   function tick() {
     const current = now();
     const session = calendar.sessionFor(current);
@@ -442,6 +484,7 @@ export function createRuntime({ broker, getContracts, getQuote, calendar, now = 
     else if (!hasOwnership() && ['STARTING', 'WAITING'].includes(state) && session?.status === 'open' && cancelingBuys.size === 0) setState(nowMono() < cooldownUntil ? 'COOLDOWN' : 'FLAT');
     if (hasOwnership() && nowMono() >= nextOwnershipScanAt && !ownershipScan) void inspectCurrentOwnership().catch(() => {});
     scheduleDeadline();
+    emitStatus(current, session);
   }
 
   function onExit(event) {

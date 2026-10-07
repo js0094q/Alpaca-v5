@@ -119,7 +119,11 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
       },
     });
     // ponytail: append-only per-ET-day jsonl of OPRA quotes + exit decisions; no retention policy, prune by hand if the account dir grows.
-    const telemetry = (event) => { mkdir(paths.directory, { recursive: true }).then(() => appendFile(join(paths.directory, `telemetry-${dateInET(event.at)}.jsonl`), `${JSON.stringify(event)}\n`)).catch(() => {}); };
+    const telemetry = (event) => {
+      const line = JSON.stringify(event);
+      if (event.type === 'runtime_status') process.stderr.write(`${line}\n`);
+      mkdir(paths.directory, { recursive: true }).then(() => appendFile(join(paths.directory, `telemetry-${dateInET(event.at)}.jsonl`), `${line}\n`)).catch(() => {});
+    };
     runtime = (dependencies.createRuntime ?? createRuntime)({ broker, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, telemetry, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: true, strategyCapital: 460.45, entryQuantity: 1, liquidateAt: untilClose ? close - 60_000 : liquidateAt });
     await runtime.start();
     ready = true;

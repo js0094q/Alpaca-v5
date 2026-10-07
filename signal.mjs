@@ -42,12 +42,15 @@ export function createSignal({ onBreakout } = {}) {
   let trades = [];
   let latestSourceKey = null;
   let receiptSequence = 0;
+  let lastPrint = null;
+  let lastBreakout = null;
 
   const reset = (nowMs) => {
     resetAt = asMs(nowMs, 'nowMs');
     trades = [];
     latestSourceKey = null;
     receiptSequence = 0;
+    lastPrint = lastBreakout = null;
   };
 
   const setSession = ({ date, open, close }) => {
@@ -76,6 +79,7 @@ export function createSignal({ onBreakout } = {}) {
     const now = asMs(nowMs, 'nowMs');
     const parsed = sourceTime(timestamp, 'trade.timestamp');
     if (!Number.isFinite(price) || price <= 0) throw new TypeError('trade.price must be positive');
+    lastPrint = { price, sourceAt: new Date(parsed.ms).toISOString(), receivedAt: new Date(now).toISOString() };
     if (latestSourceKey !== null && parsed.key < latestSourceKey) return { accepted: false, reason: 'late' };
     if (!session || now < session.openMs || now >= session.closeMs || parsed.ms < session.openMs || parsed.ms >= session.closeMs) return { accepted: false, reason: 'outside-session' };
     if (session.date && (localDate(now) !== session.date || localDate(parsed.ms) !== session.date)) return { accepted: false, reason: 'outside-session' };
@@ -94,6 +98,7 @@ export function createSignal({ onBreakout } = {}) {
     if (high === -Infinity || low === Infinity || high < low) return { accepted: false, reason: 'opening-range-invalid' };
     const margin = Math.max(0.05, 0.10 * (high - low));
     const direction = price >= high + margin ? 'CALL' : price <= low - margin ? 'PUT' : null;
+    if (direction) lastBreakout = { direction, price, sourceAt: new Date(parsed.ms).toISOString(), receivedAt: new Date(now).toISOString() };
     if (direction) onBreakout({ direction, timestamp, spyPrice: price, sourceTradeId: tradeId, receivedAt: now, priorHigh: high, priorLow: low, priorCount: trades.length, openingRangeHigh: high, openingRangeLow: low, openingRangeCount: trades.length,
       excessCents: Math.round((direction === 'CALL' ? price - high : low - price) * 10000) / 100,
       rangeCents: Math.round((high - low) * 10000) / 100, marginCents: Math.round(margin * 10000) / 100 });
@@ -130,5 +135,29 @@ export function createSignal({ onBreakout } = {}) {
       localMinutes(now) < ENTRY_END_MINUTE_ET && (!session.date || localDate(now) === session.date));
   };
 
-  return { reset, onTrade, onCorrection: replaceTrade, onCancel: removeTrade, setSession, onMarketDataStatus, canEnter };
+  // Observation only: never read this snapshot back into trading or continuity.
+  const getStatus = (nowMs) => {
+    const now = asMs(nowMs, 'nowMs');
+    const high = trades.length ? trades.reduce((v, t) => Math.max(v, t.price), -Infinity) : null;
+    const low = trades.length ? trades.reduce((v, t) => Math.min(v, t.price), Infinity) : null;
+    const margin = high === null ? null : Math.max(0.05, 0.10 * (high - low));
+    const rangeBlocker = !session ? 'NO_SESSION' : resetAt === null || resetAt > session.openMs ? 'LATE_START' :
+      now < session.openMs ? null : !readyAt(session.openMs) ? 'SIP_NOT_READY_AT_OPEN' :
+      statusEvents.some((e) => !e.ready && e.at >= session.openMs && e.at < session.rangeEndMs) ? 'OPENING_RANGE_GAP' :
+      now >= session.rangeEndMs && !trades.length ? 'NO_RANGE_PRINTS' : null;
+    const rangeStatus = rangeBlocker ? 'INVALID' : now < session.openMs ? 'PENDING' : now < session.rangeEndMs ? 'COLLECTING' : 'VALID';
+    const entryBlocker = !session ? 'NO_SESSION' : now < session.openMs ? 'BEFORE_OPEN' :
+      now >= session.closeMs || localMinutes(now) >= ENTRY_END_MINUTE_ET || (session.date && localDate(now) !== session.date) ? 'ENTRY_WINDOW_CLOSED' :
+      rangeBlocker ?? (now < session.rangeEndMs ? 'COLLECTING_RANGE' : !readyAt(now) ? 'SIP_DISCONNECTED' : null);
+    return {
+      rangeStatus, rangeBlocker, high, low, margin,
+      callTrigger: high === null ? null : high + margin, putTrigger: low === null ? null : low - margin,
+      rangePrintCount: trades.length, observationStartedAt: resetAt === null ? null : new Date(resetAt).toISOString(),
+      sipReady: readyAt(now), entryEligible: canEnter(now), entryBlocker,
+      lastPrint: lastPrint ? { ...lastPrint, ageMs: now - Date.parse(lastPrint.receivedAt), sourceAgeMs: now - Date.parse(lastPrint.sourceAt) } : null,
+      lastBreakout: lastBreakout ? { ...lastBreakout } : null,
+    };
+  };
+
+  return { reset, onTrade, onCorrection: replaceTrade, onCancel: removeTrade, setSession, onMarketDataStatus, canEnter, getStatus };
 }

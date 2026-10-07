@@ -10,6 +10,16 @@ To explicitly start a local LIVE run, use `npm run live`. LIVE keys are never so
 
 Fill measurements retain the initial construction ask across entry replacements and record each entry fill minus that ask. Exit measurements record the first bid that latched the SELL decision and each sell fill minus that bid, along with the paired order identifiers and timestamps. Restored trades without a captured decision reference remain unknown; no value is inferred.
 
+Every five seconds, a `runtime_status` JSON record goes to the existing daily telemetry file and standard error (journald on `jslive`), preserving stdout for the supervisor's fatal-error classification. It reports range status (`PENDING`, `COLLECTING`, `VALID`, `INVALID`), observed high/low and CALL/PUT trigger prices, SIP readiness, latest processed price-forming print and its age, raw SIP message/rejection counts, entry eligibility and blockers, last selected contract/reason, held positions and realized P&L. `LATE_START`, `SIP_NOT_READY_AT_OPEN`, `OPENING_RANGE_GAP` and `NO_RANGE_PRINTS` distinguish invalid coverage from waiting for a breakout. Other blockers expose cutoff, cooldown, daily-entry use, daily guard and ownership states. Selection reasons such as `NO_CONTRACTS`, `NO_ELIGIBLE_QUOTE` and `ENTRY_CAPITAL_LIMIT` remain visible in `entry.reason`.
+
+`entryEligible: true` means the current gates allow consideration of a new qualifying print; it does not mean a BUY was submitted. `signal.lastBreakout` is a detected signal, while `entry.signalAt` identifies the last attempt handed to selection. Print ages expose missing data without adding a new trading rule. Range values on an invalid or collecting range are observations, not eligible triggers. Telemetry is never used to restore the range or drive orders; failure of the telemetry callback does not stop the trading loop. View status records after deploying this build:
+
+```sh
+ssh root@jslive 'journalctl -u v5-live.service -n 200 -f -o cat | grep --line-buffered runtime_status'
+```
+
+Deploy through the existing stopped-service procedure before a future 09:30 Eastern opening range. Restarting after 09:30 loses process-observed range coverage and blocks new entries for that day; historical telemetry does not bypass that rule.
+
 Local checks:
 
 - `npm run check` runs the runtime check.
