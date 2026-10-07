@@ -37,7 +37,7 @@ const symbol = 'SPY260101C00500000';
 let mono = 0;
 let submits = 0;
 let lookups = 0;
-const sell = createPositions({ now: () => 10_000, nowMono: () => mono,
+const sell = createPositions({ now: () => 10_000, nowMono: () => mono, getDayStartCapital: () => 40,
   broker: {
     submitOrder() { submits++; return Promise.reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' })); },
     async getOrderByClientOrderId(id) { lookups++; assert.equal(id, sell.getTrades()[0].logicalSellId); return null; },
@@ -60,7 +60,7 @@ sell.onQuote({ symbol, bid: 0.88, ask: 0.89, timestamp: 10_001 });
 assert.equal(submits, 1, 'missing lookup never permits another POST');
 
 let resolveSubmit;
-const streamRace = createPositions({ now: () => 10_000,
+const streamRace = createPositions({ now: () => 10_000, getDayStartCapital: () => 40,
   broker: { submitOrder() { return new Promise((_resolve, reject) => { resolveSubmit = () => reject(new Error('late timeout')); }); } } });
 streamRace.onFill({ tradeId: 'race', executionId: 'race-buy', symbol, entryPrice: 1, timestamp: 0 });
 streamRace.onQuote({ symbol, bid: 0.89, ask: 0.90, timestamp: 10_000 });
@@ -100,7 +100,7 @@ assert.equal(staleEntry.getState().orderStatus, 'canceled');
 let replacementReads = 0;
 let replacementCalls = 0;
 let replacementMono = 0;
-const replacement = createPositions({ now: () => 10_000, nowMono: () => replacementMono,
+const replacement = createPositions({ now: () => 10_000, nowMono: () => replacementMono, getDayStartCapital: () => 40,
   broker: { async submitOrder() { return { id: 'replace-parent', status: 'new' }; },
     async replaceOrder() { replacementCalls++; throw new Error('timeout'); },
     async getOrder(id) { replacementReads++; assert.equal(id, 'replace-parent'); return { id, symbol, side: 'sell', qty: '1', filled_qty: '0', status: 'accepted' }; } } });
@@ -246,7 +246,7 @@ let replaceGetCount = 0;
 const replaceGetIds = [];
 const replaceIssues = [];
 let linkedReplaceCalls = 0;
-const linkedReplace = createPositions({ now: () => 10_000, nowMono: () => 0,
+const linkedReplace = createPositions({ now: () => 10_000, nowMono: () => 0, getDayStartCapital: () => 40,
   broker: { async submitOrder() { return { id: 'linked-parent', status: 'new' }; },
     async replaceOrder() { if (++linkedReplaceCalls === 1) throw new Error('timeout'); return { id: 'linked-final', status: 'new' }; },
     async getOrder(id) {
@@ -307,7 +307,7 @@ const sellChildLookup = new Promise((resolve) => { sellChildLookupStarted = reso
 let sellChildReads = 0;
 let sellChildCancelCount = 0;
 let restSellMono = 0;
-const restSellChild = createPositions({ now: () => 10_000, nowMono: () => restSellMono,
+const restSellChild = createPositions({ now: () => 10_000, nowMono: () => restSellMono, getDayStartCapital: () => 40,
   broker: { async submitOrder() { return { id: 'rest-sell-parent', status: 'new' }; },
     async replaceOrder() { throw new Error('timeout'); },
     async getOrder(id) {

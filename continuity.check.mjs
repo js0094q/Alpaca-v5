@@ -3,13 +3,14 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createContinuity, reconcileContinuity } from './continuity.mjs';
+import { createAlpacaBroker } from './alpaca.mjs';
 import { createPositions } from './positions.mjs';
 import { createRuntime } from './runtime.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'v5-continuity-'));
 const path = join(root, 'state.json');
 const c = createContinuity({ path });
-const trade = { tradeId: 't1', executionId: 'e1', symbol: 'SPY260921C00660000', entryPrice: 1.23, contractSize: null, contractSizeSource: null, fillTimestampMs: 1_000, anchorBid: null, anchorSetAtMs: null, anchorSourceTimestamp: null, remainingQty: 1, profitFloor: null, sellLatched: false, logicalSellId: null, orderId: null, signalId: null, tradeSetId: null };
+const trade = { tradeId: 't1', executionId: 'e1', symbol: 'SPY260921C00660000', entryPrice: 1.23, contractSize: null, contractSizeSource: null, fillTimestampMs: 1_000, anchorBid: null, anchorSetAtMs: null, anchorSourceTimestamp: null, remainingQty: 1, profitFloor: null, sellLatched: false, logicalSellId: null, orderId: null, signalId: null, tradeSetId: null, mfeCents: 0, maeCents: 0, exitReason: null, reconciling: false };
 const trade2 = { ...trade, tradeId: 't2', executionId: 'e2', symbol: 'SPY260921P00650000', entryPrice: 0.87, remainingQty: 1 };
 
 c.save([trade, trade2]);
@@ -38,18 +39,8 @@ const legacyWithoutTime = { ...legacyProtected, profitFloor: null };
 delete legacyWithoutTime.fillTimestampMs;
 writeFileSync(path, JSON.stringify({ version: 1, trades: [legacyWithoutTime] }));
 assert.equal(c.load().status, 'compatible');
-let restoredAt = 20_000;
-let restoredWithoutTime;
-restoredWithoutTime = createPositions({ broker: {}, now: () => restoredAt, onState: () => c.save(restoredWithoutTime.getTrades()) });
-restoredWithoutTime.restoreTrade(c.load().trades[0]);
-assert.deepEqual([restoredWithoutTime.getTrades()[0].fillTimestampMs, c.load().trades[0].fillTimestampMs], [20_000, 20_000]); // missing legacy time starts a fresh grace and persists
-restoredWithoutTime.onQuote({ symbol: trade.symbol, bid: 1.23, ask: 1.24, timestamp: 1 });
-assert.equal(restoredWithoutTime.getTrades()[0].anchorBid, null);
-restoredAt = 30_000;
-restoredWithoutTime.onQuote({ symbol: trade.symbol, bid: 1.23, ask: 1.24, timestamp: 1 });
-assert.equal(c.load().trades[0].anchorBid, 1.23);
 // The raw anchor remains provenance when entry is higher; every saved stage restores unchanged.
-const stagedTrade = { ...trade, tradeId: 'staged', executionId: 'staged-buy', entryPrice: 1.23, anchorBid: 1.2, anchorSetAtMs: 2_000, anchorSourceTimestamp: '2026-09-21T13:00:02.000Z' };
+const stagedTrade = { ...trade, tradeId: 'staged', executionId: 'staged-buy', entryPrice: 1.23, anchorBid: 1.2, anchorSetAtMs: 2_000, anchorSourceTimestamp: '2026-09-21T13:00:02.000Z', mfeCents: 18, maeCents: 9, exitReason: 'HARD_STOP', reconciling: true };
 const stages = [
   { ...stagedTrade, profitFloor: null, sellLatched: false, logicalSellId: null, orderId: null, remainingQty: 1 },
   { ...stagedTrade, profitFloor: 1.28, sellLatched: false, logicalSellId: null, orderId: null, remainingQty: 1 },
@@ -66,6 +57,7 @@ for (const stage of stages) {
   const restoredTrade = restoredPositions.getTrades()[0];
   assert.deepEqual([restoredTrade.anchorBid, restoredTrade.profitFloor, restoredTrade.sellLatched, restoredTrade.logicalSellId, restoredTrade.orderId, restoredTrade.remainingQty], [stage.anchorBid, stage.profitFloor, stage.sellLatched, stage.logicalSellId, stage.orderId, stage.remainingQty]);
   assert.deepEqual([restoredTrade.anchorSetAtMs, restoredTrade.anchorSourceTimestamp], [stage.anchorSetAtMs, stage.anchorSourceTimestamp]);
+  assert.deepEqual([restoredTrade.mfeCents, restoredTrade.maeCents, restoredTrade.exitReason, restoredTrade.reconciling], [stage.mfeCents, stage.maeCents, stage.exitReason, stage.reconciling]);
 }
 c.save([{ ...trade, sellLatched: true, logicalSellId: 'sell-1', orderId: 'o1' }]); // 5. SELL latch/identity survives
 assert.equal(c.load().trades[0].logicalSellId, 'sell-1');
@@ -95,31 +87,28 @@ c.save([], { pause: null, sets: [] });
 assert.deepEqual(c.load().dailyLoss, dailyLossState); // unrelated metadata updates preserve daily risk state
 c.save([], { pause: null, sets: [], dailyLoss: null });
 assert.equal(c.load().status, 'missing');
+c.save([], { filledEntryDate: '2026-09-23' });
+assert.equal(c.load().filledEntryDate, '2026-09-23', 'one-filled-entry/day marker survives without active trades');
+c.save([], { filledEntryDate: null });
+assert.equal(c.load().status, 'missing');
 
-const calls = [];
-const p = createPositions({ broker: {
-  submitOrder: async (order) => { calls.push(order); return { id: `sell-${calls.length}`, status: 'accepted' }; },
-  replaceOrder: async (id, order) => { calls.push({ id, ...order }); return { id: `${id}-r`, status: 'accepted' }; },
-}, onState: () => c.save(p.getTrades()) });
-p.onFill({ tradeId: 'live', executionId: 'buy-live', symbol: trade.symbol, entryPrice: 1, timestamp: 1 });
-p.onQuote({ symbol: trade.symbol, bid: 1, ask: 1.01, timestamp: 10_001 });
-assert.equal(c.load().trades[0].anchorBid, 1);
-p.onQuote({ symbol: trade.symbol, bid: 1.02, ask: 1.03, timestamp: 10_002 });
-assert.equal(c.load().trades[0].profitFloor, 0.98); // arm floor is 4c below first qualifying bid
-p.onQuote({ symbol: trade.symbol, bid: 1.08, ask: 1.09, timestamp: 10_003 });
-assert.equal(c.load().trades[0].profitFloor, 1.04); // peak−4c floor only moves upward
-const resumed = createPositions({ broker: { submitOrder: async () => ({ id: 'resumed-sell', status: 'accepted' }) } });
-resumed.restoreTrade(c.load().trades[0]);
-resumed.onQuote({ symbol: trade.symbol, bid: 1.03, ask: 1.04, timestamp: 10_004 });
-assert.deepEqual([resumed.getTrades()[0].anchorBid, resumed.getTrades()[0].profitFloor, resumed.getTrades()[0].sellLatched], [1, 1.04, true]);
-p.onQuote({ symbol: trade.symbol, bid: 0.95, ask: 0.96, timestamp: 10_004 });
-await Promise.resolve();
-assert.equal(c.load().trades[0].sellLatched, true); // actual persistent SELL latch persisted
-const sellId = 'sell-1';
-p.onOrderUpdate({ orderId: sellId, executionId: 'sell-partial', fillQty: 0.5, fillPrice: 0.95, timestamp: 10_005 });
-assert.equal(c.load().trades[0].remainingQty, 0.5); // actual partial SELL persisted
-p.onOrderUpdate({ orderId: sellId, executionId: 'sell-final', fillQty: 0.5, fillPrice: 0.95, timestamp: 10_006 });
-assert.equal(c.load().status, 'missing'); // actual confirmed FLAT clears state
+const activityRequests = [];
+const activityBroker = createAlpacaBroker({ key: 'key', secret: 'secret', baseUrl: 'https://paper-api.alpaca.markets', fetchImpl: async (url, options) => {
+  activityRequests.push({ url: new URL(url), options });
+  const token = new URL(url).searchParams.get('page_token');
+  const rows = token ? [{ id: 'fill-101', activity_type: 'FILL' }] : Array.from({ length: 100 }, (_, index) => ({ id: `fill-${String(index + 1).padStart(3, '0')}`, activity_type: 'FILL' }));
+  return { ok: true, status: 200, text: async () => JSON.stringify(rows) };
+} });
+const activityRows = await activityBroker.getFillActivities({ after: '2026-09-23T13:30:00.000Z' });
+assert.equal(activityRows.length, 101);
+assert.equal(activityRequests.length, 2, 'FILL activities paginate at 100 rows');
+assert.ok(activityRequests.every(({ url, options }) => url.pathname === '/v2/account/activities/FILL' && options.method === undefined));
+assert.deepEqual(activityRequests.map(({ url }) => [url.searchParams.get('direction'), url.searchParams.get('page_size'), url.searchParams.get('after')]), [
+  ['asc', '100', '2026-09-23T13:30:00.000Z'], ['asc', '100', '2026-09-23T13:30:00.000Z'],
+]);
+assert.equal(activityRequests[1].url.searchParams.get('page_token'), 'fill-100');
+const incompleteActivityBroker = createAlpacaBroker({ key: 'key', secret: 'secret', baseUrl: 'https://paper-api.alpaca.markets', fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ activities: [] }) }) });
+await assert.rejects(incompleteActivityBroker.getFillActivities(), /Incomplete account activity page/);
 
 const recoveryPath = join(root, 'recovery.json');
 const recoveryContinuity = createContinuity({ path: recoveryPath });
@@ -137,8 +126,8 @@ const recoveryRuntime = createRuntime(recoveryRuntimeArgs);
 await recoveryRuntime.startup();
 recoveryRuntime.onQuote({ symbol: recoverySymbol, bid: 1, ask: 1.01, timestamp: 1 });
 await Promise.resolve(); await Promise.resolve();
-assert.equal(recoveryCalls.filter(([kind]) => kind === 'replace').length, 2); // two existing SELL identities
-assert.equal(recoveryCalls.filter(([kind]) => kind === 'submit').length, 1); // one uncovered quantity
+assert.equal(recoveryCalls.filter(([kind]) => kind === 'replace').length, 2); // two existing V5 SELL identities remain independently owned
+assert.equal(recoveryCalls.filter(([kind]) => kind === 'submit').length, 1); // uncovered broker quantity gets one V5 SELL
 const recovered = recoveryContinuity.load().trades;
 assert.equal(recovered.length, 3);
 assert.equal(new Set(recovered.map((trade) => trade.logicalSellId)).size, 3);

@@ -3,6 +3,7 @@ import { createEntry } from './entry.mjs';
 import { createPositions } from './positions.mjs';
 import { createLedger } from './ledger.mjs';
 import { createRuntime } from './runtime.mjs';
+import { seedOpeningRange, triggerBreakout } from './check-support.mjs';
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 let wall = Date.parse('2026-10-02T14:00:00.000Z');
@@ -65,12 +66,13 @@ const positions = createPositions({
     async cancelOrder() {},
   },
   onExit: (exit) => exits.push(exit),
+  getDayStartCapital: () => 20,
   onState: () => {},
   now: () => wall,
   nowMono: () => mono,
 });
 positions.onFill(fills[0]);
-wall += 10_100;
+wall += 100;
 positions.onQuote({ symbol: fills[0].symbol, bid: 0.46, ask: 0.48, timestamp: new Date(wall).toISOString() });
 await flush();
 assert.equal(sellOrders.length, 1);
@@ -122,6 +124,7 @@ const sellReplacement = createPositions({
     async cancelOrder() {},
   },
   onExit: (exit) => replacedExits.push(exit), onState: () => {}, now: () => wall, nowMono: () => mono,
+  getDayStartCapital: () => 4,
 });
 sellReplacement.onFill({ ...fills[0], tradeId: 'sell-replacement-trade', executionId: 'sell-replacement-buy', timestamp: new Date(wall).toISOString() });
 wall += 10_100;
@@ -141,7 +144,7 @@ assert.doesNotThrow(() => ledger.record({ event: 'FILL', date: '2026-10-02', ent
 await flush();
 
 // A rejecting runtime ledger cannot prevent actual BUY and SELL fill callbacks.
-let runtimeWall = Date.parse('2026-10-02T14:00:00.000Z');
+let runtimeWall = Date.parse('2026-10-02T13:30:00.000Z');
 let runtimeMono = 0;
 const runtimeBrokerOrders = new Map();
 let nextRuntimeOrder = 0;
@@ -163,34 +166,31 @@ const runtime = createRuntime({
   },
   calendar: { sessionFor: () => ({ date: '2026-10-02', status: 'open', open: '2026-10-02T13:30:00Z', close: '2026-10-02T20:00:00Z' }) },
   getContracts: async () => [{ symbol: 'SPY261002C00660000', strike: 660, contractSize: 100 }],
-  getQuote: async () => ({ bid: 0.50, ask: 0.52, timestamp: new Date(runtimeWall).toISOString() }),
+  getQuote: async () => ({ bid: 0.01, ask: 0.04, timestamp: new Date(runtimeWall).toISOString() }),
   now: () => runtimeWall,
   nowMono: () => runtimeMono,
   continuity: { load: () => ({ status: 'missing', trades: [] }), save: () => {} },
   ledger: (event) => { runtimeLedgerEvents.push(event); return Promise.reject(new Error('runtime ledger unavailable')); },
   entryQuantity: 1,
+  strategyCapital: 10,
 });
 try {
   await runtime.startup();
-  runtime.onTrade({ timestamp: new Date(runtimeWall).toISOString(), price: 659 });
-  for (let i = 0; i < 29; i += 1) {
-    runtimeWall += 1_000;
-    runtime.onTrade({ timestamp: new Date(runtimeWall).toISOString(), price: 659 });
-  }
-  runtimeWall += 1_000;
-  runtime.onTrade({ timestamp: new Date(runtimeWall).toISOString(), price: 660 });
+  seedOpeningRange(runtime, '2026-10-02');
+  runtimeWall = Date.parse('2026-10-02T13:45:00.000Z');
+  triggerBreakout(runtime, '2026-10-02', 102, 'runtime-breakout');
   await flush(); await flush();
   const buy = [...runtimeBrokerOrders.values()].find((order) => order.side === 'buy');
   assert.ok(buy, 'BUY submits while ledger writes reject');
   runtime.onOrderUpdate({ side: 'buy', event: 'fill', orderId: buy.id, clientOrderId: buy.clientOrderId,
-    executionId: 'runtime-buy-fill', fillQty: 1, fillPrice: 0.53, timestamp: new Date(runtimeWall).toISOString() });
-  runtimeWall += 10_100;
-  runtime.onQuote({ symbol: 'SPY261002C00660000', bid: 0.46, ask: 0.48, timestamp: new Date(runtimeWall).toISOString() });
+    executionId: 'runtime-buy-fill', fillQty: 1, fillPrice: 0.04, timestamp: new Date(runtimeWall).toISOString() });
+  runtimeWall += 100;
+  runtime.onQuote({ symbol: 'SPY261002C00660000', bid: 0.01, ask: 0.04, timestamp: new Date(runtimeWall).toISOString() });
   await flush();
   const sell = [...runtimeBrokerOrders.values()].find((order) => order.side === 'sell');
   assert.ok(sell, 'SELL submits after the confirmed BUY despite rejected ledger writes');
   runtime.onOrderUpdate({ side: 'sell', event: 'fill', orderId: sell.id, clientOrderId: sell.clientOrderId,
-    executionId: 'runtime-sell-fill', fillQty: 1, fillPrice: 0.45, timestamp: new Date(runtimeWall + 100).toISOString() });
+    executionId: 'runtime-sell-fill', fillQty: 1, fillPrice: 0.03, timestamp: new Date(runtimeWall + 100).toISOString() });
   await flush();
   assert.ok(runtimeLedgerEvents.some((event) => event.event === 'FILL' && event.entryFillVsDecisionAsk !== undefined));
   assert.ok(runtimeLedgerEvents.some((event) => event.event === 'EXIT' && event.sellFillVsDecisionBid !== undefined));

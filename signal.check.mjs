@@ -1,125 +1,115 @@
 import assert from 'node:assert/strict';
 import { createSignal } from './signal.mjs';
 
-const session = {
-  date: '2026-09-23',
-  open: '2026-09-23T13:30:00.000Z',
-  close: '2026-09-23T20:00:00.000Z',
-};
+const date = '2026-09-23';
+const open = Date.parse(`${date}T13:30:00Z`);
+const rangeEnd = open + 15 * 60_000;
+const cutoff = open + 2 * 60 * 60_000;
+const session = { date, open, close: Date.parse(`${date}T20:00:00Z`) };
 const events = [];
 const signal = createSignal({ onBreakout: (event) => events.push(event) });
 signal.setSession(session);
+signal.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: open - 1_000 });
+const trade = (at, price, now = at, tradeId) => signal.onTrade({ timestamp: at, price, tradeId, exchange: 'Q' }, now);
 
-const feed = (sourceMs, price, nowMs = sourceMs) => signal.onTrade({
-  timestamp: new Date(sourceMs).toISOString(),
-  price,
-}, nowMs);
-
-const base = Date.parse('2026-09-23T13:33:00.000Z');
-signal.reset(base);
-feed(base + 1_000, 102);
-feed(base + 10_000, 100);
-feed(base + 29_000, 100);
-feed(base + 30_000, 101);
-assert.equal(events.length, 0, 'first post-warmup sample does not break prior high');
-feed(base + 30_500, 103);
+signal.reset(open - 1);
+assert.equal(trade(open, 100).accepted, true, '09:30 inclusive contributes to range');
+trade(open + 14 * 60_000 + 59_999, 102);
+assert.equal(trade(rangeEnd, 102).accepted, true, 'a covered 09:45 print inside the margin is accepted');
+assert.equal(events.length, 0);
+assert.equal(trade(rangeEnd, 102.2).accepted, true, '09:45 inclusive can trigger at the threshold');
 assert.equal(events.at(-1).direction, 'CALL');
-feed(base + 31_000, 103);
-assert.equal(events.length, 1, 'equality does not emit');
-feed(base + 31_500, 99);
-assert.equal(events.at(-1).direction, 'PUT');
+assert.equal(events.at(-1).openingRangeHigh, 102);
+assert.equal(events.at(-1).openingRangeLow, 100);
+assert.equal(events.at(-1).openingRangeCount, 2, '09:45 prints are excluded from the range');
 
-signal.reset(base + 40_000);
-feed(base + 41_000, 100);
-feed(base + 50_000, 101);
-feed(base + 69_000, 99);
-assert.equal(events.length, 2, 'reconnect warmup suppresses emissions');
-feed(base + 70_000, 102);
-assert.equal(events.at(-1).direction, 'CALL');
+const before = events.length;
+trade(rangeEnd + 1, 102.19);
+assert.equal(events.length, before, 'price inside the range-relative margin does not signal');
+trade(rangeEnd + 2, 102.20);
+assert.equal(events.at(-1).direction, 'CALL', 'threshold is inclusive');
+trade(rangeEnd + 3, 99.80);
+assert.equal(events.at(-1).direction, 'PUT', 'downside threshold is inclusive and symmetric');
+assert.equal(trade(cutoff, 110).reason, 'entry-cutoff', '11:30 source timestamp is excluded');
+assert.equal(trade(cutoff - 1, 110, cutoff).reason, 'entry-cutoff', '11:30 wall clock is excluded');
 
-const entry = Date.parse('2026-09-23T13:31:30.000Z');
-signal.reset(entry);
-const beforeOpening = events.length;
-feed(entry + 1_000, 100);
-feed(entry + 10_000, 100);
-feed(entry + 29_000, 100);
-assert.equal(events.length, beforeOpening, '09:31:59 ET remains entry-ineligible');
-feed(entry + 30_000, 101);
-assert.equal(events.length, beforeOpening + 1, '09:32 ET emits a new entry signal');
-assert.equal(events.at(-1).direction, 'CALL', '09:32 ET permits entry');
+signal.reset(open + 1);
+signal.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: open + 2 });
+trade(rangeEnd, 110);
+assert.equal(events.at(-1).openingRangeHigh, 102, 'reset invalidates old range and late subscription cannot restore coverage');
+assert.equal(events.length, before + 2, 'reset cannot signal from incomplete new range');
 
-const cutoff = Date.parse('2026-09-23T15:29:28.000-04:00');
-signal.reset(cutoff);
-feed(cutoff + 1_000, 100);
-feed(cutoff + 10_000, 100);
-feed(cutoff + 29_000, 100);
-const beforeCutoff = events.length;
-feed(Date.parse('2026-09-23T15:29:59.000-04:00'), 101);
-assert.equal(events.length, beforeCutoff + 1, '15:29:59 ET permits entry');
-feed(Date.parse('2026-09-23T15:29:59.999-04:00'), 102);
-assert.equal(events.length, beforeCutoff + 2, '15:29:59.999 ET permits entry');
-for (const time of ['15:30:00.000', '15:30:00.001', '15:31:00.000']) {
-  assert.equal(feed(Date.parse(`2026-09-23T${time}-04:00`), 103).reason, 'entry-cutoff');
-  assert.equal(events.length, beforeCutoff + 2, `${time} ET suppresses entry`);
-}
+const correctedEvents = [];
+const corrected = createSignal({ onBreakout: (event) => correctedEvents.push(event) });
+corrected.setSession(session);
+corrected.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: open - 1_000 });
+corrected.reset(open - 1);
+corrected.onTrade({ timestamp: open, price: 100, tradeId: 'a', exchange: 'Q' }, open);
+corrected.onTrade({ timestamp: open + 60_000, price: 102, tradeId: 'b', exchange: 'Q' }, open + 60_000);
+corrected.onCorrection({ originalTradeId: 'b', exchange: 'Q', correctedTrade: { price: 101 } }, rangeEnd);
+corrected.onTrade({ timestamp: rangeEnd, price: 101.10 }, rangeEnd);
+assert.equal(correctedEvents.at(-1).direction, 'CALL', 'corrected high is used for inclusive threshold');
+assert.equal(correctedEvents.at(-1).openingRangeHigh, 101);
+corrected.onCancel({ tradeId: 'b', exchange: 'Q' }, rangeEnd + 1);
+const afterCancel = correctedEvents.length;
+corrected.onTrade({ timestamp: rangeEnd + 2, price: 100 }, rangeEnd + 2);
+assert.equal(correctedEvents.length, afterCancel, 'cancel updates the frozen range before later signal decisions');
 
-console.log('signal.check.mjs: approved WS1 rules pass');
+const late = createSignal({ onBreakout: () => {} });
+late.setSession(session);
+late.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: open - 1_000 });
+late.reset(open + 1);
+assert.equal(late.onTrade({ timestamp: rangeEnd, price: 101 }, rangeEnd).reason, 'opening-range-coverage', 'reset after the open cannot claim full-day coverage');
 
-// A caller may choose an earlier session cutoff; the default cutoff is 15:30 ET.
-const extended = createSignal({ onBreakout: () => {}, entryCutoffMinuteET: 925 });
-extended.setSession(session);
-for (const [clock, accepted] of [['13:00:00.000', true], ['15:24:59.999', true], ['15:25:00.000', false]]) {
-  const at = Date.parse(`2026-09-23T${clock}-04:00`);
-  assert.equal(extended.onTrade({ timestamp: at, price: 100 }, at).accepted, accepted);
-}
-const brokerCutoff = createSignal({ onBreakout: () => {}, entryCutoffMinuteET: 16 * 60 });
-brokerCutoff.setSession(session);
-for (const [clock, accepted] of [['15:29:59.999', true], ['15:30:00.000', false]]) {
-  const at = Date.parse(`2026-09-23T${clock}-04:00`);
-  assert.equal(brokerCutoff.onTrade({ timestamp: at, price: 100 }, at).accepted, accepted);
-}
-for (const invalid of [-1, 1440, 925.5, NaN, '925']) assert.throws(() => createSignal({ onBreakout: () => {}, entryCutoffMinuteET: invalid }), RangeError);
+const lateSubscription = createSignal({ onBreakout: () => {} });
+lateSubscription.setSession(session);
+lateSubscription.reset(open - 1);
+lateSubscription.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: open + 60_000 });
+lateSubscription.onTrade({ timestamp: open, price: 100 }, open);
+assert.equal(lateSubscription.onTrade({ timestamp: rangeEnd, price: 101 }, rangeEnd).reason, 'opening-range-coverage', 'subscription after 09:30 cannot certify the full window');
 
-const sourceEvents = [];
-const sourceGated = createSignal({ onBreakout: (event) => sourceEvents.push(event) });
-sourceGated.setSession(session);
-const open = Date.parse('2026-09-23T13:30:00.000Z');
-sourceGated.reset(open);
-assert.equal(sourceGated.onTrade({ timestamp: open - 1, price: 1_000 }, open + 1_000).reason, 'outside-session', 'premarket source print cannot seed the regular-session window');
-sourceGated.onTrade({ timestamp: open + 10_000, price: 100 }, open + 10_000);
-sourceGated.onTrade({ timestamp: open + 20_000, price: 101 }, open + 20_000);
-assert.equal(sourceGated.onTrade({ timestamp: open + 120_000 - 1, price: 99 }, open + 120_000 + 1_000).accepted, true);
-assert.equal(sourceEvents.length, 0, 'a delayed pre-09:32 source print cannot trigger an entry after 09:32');
-sourceGated.onTrade({ timestamp: open + 126_000, price: 98.5 }, open + 126_000);
-assert.equal(sourceEvents.at(-1).direction, 'PUT', 'a fresh post-09:32 source print can qualify');
+const delayedClock = createSignal({ onBreakout: () => {} });
+delayedClock.setSession(session);
+delayedClock.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: open - 1_000 });
+delayedClock.reset(open - 1);
+delayedClock.onTrade({ timestamp: open, price: 100 }, open);
+delayedClock.onTrade({ timestamp: rangeEnd, price: 110 }, rangeEnd - 1);
+assert.equal(delayedClock.canEnter(rangeEnd - 1), false, 'source time at 09:45 cannot signal before wall clock reaches 09:45');
+assert.equal(delayedClock.onTrade({ timestamp: rangeEnd + 1, price: 110 }, rangeEnd + 1).accepted, true);
 
-// Breakout margin: clear the 30s range by max(2c, 20% of range).
-const marginEvents = [];
-const margined = createSignal({ onBreakout: (event) => marginEvents.push(event), breakoutMarginCents: 2, breakoutRangeFraction: 0.2 });
-margined.setSession(session);
-const marginOpen = Date.parse(session.open);
-margined.reset(marginOpen);
-const t0 = marginOpen + 130_000;
-margined.onTrade({ timestamp: t0, price: 100.10 }, t0);
-margined.onTrade({ timestamp: t0 + 1_000, price: 100.00 }, t0 + 1_000);
-const marginBaseline = marginEvents.length;
-margined.onTrade({ timestamp: t0 + 2_000, price: 100.11 }, t0 + 2_000);
-assert.equal(marginEvents.length, marginBaseline, 'a 1c excess over a 10c range does not clear a 2c floor');
-margined.onTrade({ timestamp: t0 + 3_000, price: 100.12 }, t0 + 3_000);
-assert.equal(marginEvents.length, marginBaseline, 'the 1c print raised the window high to 100.11, so 100.12 is again only 1c');
-margined.onTrade({ timestamp: t0 + 4_000, price: 100.15 }, t0 + 4_000);
-assert.equal(marginEvents.length, marginBaseline + 1, 'a 3c jump over a 12c range (2.4c margin) clears');
-assert.deepEqual([marginEvents.at(-1).direction, marginEvents.at(-1).excessCents, marginEvents.at(-1).rangeCents, marginEvents.at(-1).marginCents], ['CALL', 3, 12, 2.4]);
-margined.onTrade({ timestamp: t0 + 5_000, price: 100.60 }, t0 + 5_000);
-assert.equal(marginEvents.length, marginBaseline + 2, 'a 48c excess clears');
-margined.onTrade({ timestamp: t0 + 6_000, price: 100.70 }, t0 + 6_000);
-assert.equal(marginEvents.length, marginBaseline + 2, '10c excess over a 60c range (12c margin) does not clear');
-margined.onTrade({ timestamp: t0 + 7_000, price: 100.84 }, t0 + 7_000);
-assert.equal(marginEvents.length, marginBaseline + 3, '14c excess over a 70c range (14c margin) clears');
-assert.equal(marginEvents.at(-1).marginCents, 14);
-margined.onTrade({ timestamp: t0 + 8_000, price: 99.80 }, t0 + 8_000);
-assert.equal(marginEvents.at(-1).direction, 'PUT', 'the margin applies symmetrically to the downside');
-assert.equal(events.at(-1).marginCents, 0, 'default signal reports a zero margin');
-for (const invalid of [-1, NaN, '2']) assert.throws(() => createSignal({ onBreakout: () => {}, breakoutMarginCents: invalid }), RangeError);
-for (const invalid of [-0.1, 1, NaN]) assert.throws(() => createSignal({ onBreakout: () => {}, breakoutRangeFraction: invalid }), RangeError);
-console.log('signal margin check passed');
+const reconnect = createSignal({ onBreakout: () => {} });
+reconnect.setSession(session);
+reconnect.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: open - 1_000 });
+reconnect.reset(open - 1);
+reconnect.onTrade({ timestamp: open, price: 100 }, open);
+reconnect.onMarketDataStatus({ status: 'disconnected', timestamp: open + 5 * 60_000 });
+reconnect.onMarketDataStatus({ status: 'reconnected', timestamp: open + 6 * 60_000 });
+assert.equal(reconnect.onTrade({ timestamp: rangeEnd, price: 101 }, rangeEnd).reason, 'opening-range-coverage', 'reconnect gap during opening window permanently invalidates it');
+
+const afterWindowReconnect = createSignal({ onBreakout: () => {} });
+afterWindowReconnect.setSession(session);
+afterWindowReconnect.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: open - 1_000 });
+afterWindowReconnect.reset(open - 1);
+afterWindowReconnect.onTrade({ timestamp: open, price: 100 }, open);
+afterWindowReconnect.onTrade({ timestamp: open + 1_000, price: 99.9 }, open + 1_000);
+afterWindowReconnect.onMarketDataStatus({ status: 'disconnected', timestamp: rangeEnd });
+assert.equal(afterWindowReconnect.canEnter(rangeEnd + 1), false, 'current disconnection blocks pending entry');
+afterWindowReconnect.onMarketDataStatus({ status: 'reconnected', timestamp: rangeEnd + 1_000 });
+afterWindowReconnect.onTrade({ timestamp: rangeEnd + 1_001, price: 100.05 }, rangeEnd + 1_001);
+assert.equal(afterWindowReconnect.canEnter(rangeEnd + 1_001), true, 'post-window reconnect retains a fully observed range');
+
+const minimumMarginEvents = [];
+const minimumMargin = createSignal({ onBreakout: (event) => minimumMarginEvents.push(event) });
+minimumMargin.setSession(session);
+minimumMargin.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: open - 1_000 });
+minimumMargin.reset(open - 1);
+minimumMargin.onTrade({ timestamp: open, price: 100 }, open);
+minimumMargin.onTrade({ timestamp: open + 1_000, price: 99.9 }, open + 1_000);
+minimumMargin.onTrade({ timestamp: rangeEnd, price: 100.04 }, rangeEnd);
+assert.equal(minimumMarginEvents.length, 0, 'the five cent floor applies to a narrow range');
+minimumMargin.onTrade({ timestamp: rangeEnd + 1, price: 100.05 }, rangeEnd + 1);
+assert.equal(minimumMarginEvents.at(-1).direction, 'CALL', 'the minimum margin threshold is inclusive');
+assert.equal(minimumMargin.canEnter(rangeEnd + 1), true);
+assert.equal(minimumMargin.canEnter(cutoff), false, 'pending submission at 11:30 is blocked');
+
+console.log('signal.check.mjs: opening range rules pass');

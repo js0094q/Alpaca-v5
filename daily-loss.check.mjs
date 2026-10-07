@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createContinuity } from './continuity.mjs';
 import { createRuntime } from './runtime.mjs';
+import { seedOpeningRange } from './check-support.mjs';
 
 const symbol = 'SPY260923C00660000';
 const date = '2026-09-23';
@@ -11,7 +12,7 @@ const session = (day = date) => ({ date: day, status: 'open', open: `${day}T13:3
 const stateFile = () => join(mkdtempSync(join(tmpdir(), 'v5-daily-loss-')), 'state.json');
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-let wall = Date.parse('2026-09-23T14:00:00Z');
+let wall = Date.parse('2026-09-23T13:29:59Z');
 let mono = 0;
 function brokerWith({ positions = [], orders = [], equity = 10_000 } = {}) {
   const currentOrders = new Map(orders.map((order) => [order.id, { ...order }]));
@@ -44,19 +45,23 @@ async function initialize(continuity, broker, sets = [], dailyLoss = null, day =
   continuity.save([], { pause: null, sets, dailyLoss });
   const r = runtime({ continuity, broker, day, ...options });
   await r.startup();
+  if (wall <= Date.parse(`${day}T13:30:00Z`)) {
+    wall = Date.parse(`${day}T13:30:00Z`);
+    seedOpeningRange(r, day);
+  }
   return r;
 }
 async function sendBreakout(r, label = 'daily-loss') {
-  wall += 31_000; mono += 31_000;
-  r.onTrade({ timestamp: new Date(wall).toISOString(), price: 100, tradeId: `${label}-range` });
-  wall += 1_000; mono += 1_000;
-  r.onTrade({ timestamp: new Date(wall).toISOString(), price: 101, tradeId: `${label}-break` });
+  const rangeEnd = Date.parse(`${date}T13:45:00Z`);
+  if (wall < rangeEnd) { mono += rangeEnd - wall; wall = rangeEnd; }
+  else { wall += 1_000; mono += 1_000; }
+  r.onTrade({ timestamp: new Date(wall).toISOString(), price: 102, tradeId: `${label}-break` });
   await flush(); await flush();
 }
 
 // Completed losing sets add their realized gross once. The exact -10% boundary
 // trips, including when an earlier completed set is replayed after restart.
-wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+wall = Date.parse('2026-09-23T13:29:59Z'); mono = 0;
 const exactContinuity = createContinuity({ path: stateFile() });
 const exactBaseline = { date, dayStartEquity: 2_500, cumulativeRealizedGross: -150, tripped: false, completedBuyIds: ['buy-1'] };
 const exactBroker = brokerWith();
@@ -66,20 +71,19 @@ try {
   assert.equal(daily.cumulativeRealizedGross, -250, 'cumulative completed gross is in account dollars');
   assert.equal(daily.tripped, true, 'the exact 10% loss boundary trips');
   assert.deepEqual(daily.completedBuyIds, ['buy-1', 'buy-2'], 'replayed completion is deduplicated');
-  assert.ok(exact.getState().lossPauseUntil > wall, 'the existing 60-second losing-set pause remains active');
+  assert.equal(exact.getState().lossPauseUntil, undefined, 'a losing set does not create a 60-second pause');
   const buyCount = exactBroker.calls.filter((order) => order.side === 'buy').length;
   await sendBreakout(exact, 'at-boundary');
   assert.equal(exactBroker.calls.filter((order) => order.side === 'buy').length, buyCount, 'trip suppresses new BUY entries');
-  wall = exact.getState().lossPauseUntil + 1; mono += 61_000; exact.tick();
-  assert.equal(exact.getState().state, 'FLAT', 'ordinary losing-set pause expires normally');
+  wall += 61_000; mono += 61_000; exact.tick();
   await sendBreakout(exact, 'after-pause');
   assert.equal(exact.getState().dailyLoss.tripped, true, 'daily trip remains sticky after 60 seconds');
-  assert.equal(exactBroker.calls.filter((order) => order.side === 'buy').length, buyCount, 'sticky trip still suppresses BUY after the 60-second pause expires');
+  assert.equal(exactBroker.calls.filter((order) => order.side === 'buy').length, buyCount, 'sticky trip still suppresses BUY');
 } finally { exact.stop(); }
 
 // A loss above the boundary does not trip; exact zero and positive completed
 // gross do not become losses. A same-day process restart retains the P&L state.
-wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+wall = Date.parse('2026-09-23T13:29:59Z'); mono = 0;
 const aboveContinuity = createContinuity({ path: stateFile() });
 const aboveState = { date, dayStartEquity: 2_500, cumulativeRealizedGross: -249.99, peakRealizedGross: 0, tripped: false, completedBuyIds: ['prior'] };
 const aboveBroker = brokerWith();
@@ -92,36 +96,11 @@ try {
   const restarted = runtime({ continuity: aboveContinuity, broker: aboveBroker });
   try {
     await restarted.startup();
+    wall = Date.parse(`${date}T13:30:00Z`);
+    seedOpeningRange(restarted, date);
     assert.deepEqual(restarted.getState().dailyLoss, beforeRestart, 'same-day restart preserves baseline, totals, and dedup IDs');
-    const buysBefore = aboveBroker.calls.filter((order) => order.side === 'buy').length;
     await sendBreakout(restarted, 'below-threshold-control');
-    const buy = [...aboveBroker.orders.values()].find((order) => order.side === 'buy');
-    assert.ok(buy, 'below-threshold PAPER guard allows a new BUY');
-    assert.equal(aboveBroker.calls.filter((order) => order.side === 'buy').length, buysBefore + 1);
-    for (const [index, event] of ['partial_fill', 'partial_fill'].entries()) {
-      wall += 100; mono += 100;
-      restarted.onOrderUpdate({ event, side: 'buy', orderId: buy.id, clientOrderId: buy.clientOrderId,
-        executionId: `paper-buy-${index}`, fillQty: 1, fillPrice: 1, timestamp: new Date(wall).toISOString() });
-    }
-    wall += 100; mono += 100;
-    restarted.onOrderUpdate({ event: 'canceled', side: 'buy', orderId: buy.id, clientOrderId: buy.clientOrderId });
-    wall += 10_001; mono += 10_001;
-    restarted.onQuote({ symbol, bid: 1, ask: 1.01, timestamp: new Date(wall).toISOString() });
-    wall += 100; mono += 100;
-    restarted.onQuote({ symbol, bid: 1.02, ask: 1.03, timestamp: new Date(wall).toISOString() });
-    wall += 100; mono += 100;
-    restarted.onQuote({ symbol, bid: 0.89, ask: 0.90, timestamp: new Date(wall).toISOString() });
-    await flush(); await flush();
-    const sells = [...aboveBroker.orders.values()].filter((order) => order.side === 'sell');
-    assert.equal(sells.length, 2, 'existing trail submits SELL orders for both filled contracts');
-    const soldAt = wall + 100;
-    for (const sell of sells) {
-      wall = soldAt; mono += 100;
-      restarted.onOrderUpdate({ event: 'fill', side: 'sell', orderId: sell.id, clientOrderId: sell.clientOrderId,
-        executionId: `paper-sell-${sell.id}`, fillQty: 1, fillPrice: 0.80, timestamp: new Date(wall).toISOString() });
-    }
-    assert.equal(restarted.getState().dailyLoss.cumulativeRealizedGross, -284.99, 'broker-confirmed BUY and SELL fills update cumulative gross in USD');
-    assert.equal(restarted.getState().dailyLoss.tripped, true, 'the broker-confirmed cycle crosses the daily limit');
+    assert.equal(aboveBroker.calls.filter((order) => order.side === 'buy').length, 0, 'a prior filled trade locks further entries for the day');
     const tripState = restarted.getState().dailyLoss;
     restarted.stop();
     const tripRestart = runtime({ continuity: aboveContinuity, broker: brokerWith() });
@@ -134,7 +113,7 @@ try {
 
 // A new trading date starts a new baseline from that day's authenticated
 // broker snapshot and clears yesterday's sticky trip.
-wall = Date.parse('2026-09-24T14:00:00Z'); mono = 0;
+wall = Date.parse('2026-09-24T13:29:59Z'); mono = 0;
 const nextDayBroker = brokerWith({ equity: 8_000 });
 const nextDay = runtime({ continuity: aboveContinuity, broker: nextDayBroker, day: '2026-09-24' });
 try {
@@ -150,7 +129,7 @@ for (const [label, sets, cumulative, peak, tripped] of [
   ['from-open', [['down', -50]], -50, 0, true],
   ['profit-runs', [['up', 100], ['dip', -30], ['up2', 60], ['down', -49.99]], 80.01, 130, false],
 ]) {
-  wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+  wall = Date.parse('2026-09-23T13:29:59Z'); mono = 0;
   const r = await initialize(createContinuity({ path: stateFile() }), brokerWith({ equity: 500 }),
     sets.map(([id, dollars]) => closedSet(`${label}-${id}`, { lossDollars: dollars })),
     { date, dayStartEquity: 500, cumulativeRealizedGross: 0, tripped: false, completedBuyIds: [] });
@@ -165,7 +144,7 @@ for (const [label, sets, cumulative, peak, tripped] of [
 // Same-day state persisted before the high-water mark existed cannot prove its
 // peak (e.g. +$100 then back to +$25), so further BUYs are blocked for that
 // date and the restored block is written to the ledger.
-wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+wall = Date.parse('2026-09-23T13:29:59Z'); mono = 0;
 const legacyLedger = [];
 const legacyBroker = brokerWith({ equity: 500 });
 const legacy = await initialize(createContinuity({ path: stateFile() }), legacyBroker, [],
@@ -182,7 +161,7 @@ try {
 } finally { legacy.stop(); }
 
 // A tripped state restored after a restart writes one ledger line.
-wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+wall = Date.parse('2026-09-23T13:29:59Z'); mono = 0;
 const restoredLedger = [];
 const restoredTrip = await initialize(createContinuity({ path: stateFile() }), brokerWith({ equity: 500 }), [],
   { date, dayStartEquity: 500, cumulativeRealizedGross: 166, peakRealizedGross: 216, tripped: true, completedBuyIds: ['a'] },
@@ -195,7 +174,7 @@ try {
 
 // The budget is frozen at DAY_START: raising capital to $1,000 mid-day keeps
 // today's $50 budget, so a $50 give-back still trips.
-wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+wall = Date.parse('2026-09-23T13:29:59Z'); mono = 0;
 const frozen = await initialize(createContinuity({ path: stateFile() }), brokerWith({ equity: 500 }),
   [closedSet('frozen-down', { lossDollars: -50 })],
   { date, dayStartEquity: 500, cumulativeRealizedGross: 100, peakRealizedGross: 100, tripped: false, completedBuyIds: ['frozen-prior'] },
@@ -207,7 +186,7 @@ try {
 
 // Fractional baseline equity is rounded at the currency boundary: $10.04 is
 // exactly 10% of $100.40 and must trip rather than miss from binary rounding.
-wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+wall = Date.parse('2026-09-23T13:29:59Z'); mono = 0;
 const fractionalContinuity = createContinuity({ path: stateFile() });
 const fractionalBroker = brokerWith({ equity: 100.40 });
 fractionalContinuity.save([], { pause: null, sets: [closedSet('fractional-loss', { lossDollars: -10.04 })] });
@@ -225,7 +204,7 @@ assert.match(paperSource, /dailyLossGuard:\s*true/);
 
 // Daily loss gates new entries only. An already-owned position keeps its SELL
 // order lifecycle while the trip is active.
-wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+wall = Date.parse('2026-09-23T13:29:59Z'); mono = 0;
 const ownedContinuity = createContinuity({ path: stateFile() });
 const ownedTrade = { tradeId: 'owned-1', executionId: 'owned-buy', symbol, entryPrice: 1, contractSize: 100,
   contractSizeSource: 'alpaca_contract_metadata', fillTimestampMs: wall - 20_000, anchorBid: null,
@@ -248,7 +227,7 @@ try {
 
 // Establishing a missing same-date baseline must retain restored ownership and
 // in-flight set accounting through every startup continuity write.
-wall = Date.parse('2026-09-23T14:00:00Z'); mono = 0;
+wall = Date.parse('2026-09-23T13:29:59Z'); mono = 0;
 const startupContinuity = createContinuity({ path: stateFile() });
 const startupSet = { tradeSetId: 'owned-set', date, known: true, entryQty: 1, entryCentQty: 100,
   exitQty: 0, exitCentQty: 0, entryTerminal: false, closedAt: null };

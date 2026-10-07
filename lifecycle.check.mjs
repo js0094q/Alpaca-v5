@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { createRuntime } from './runtime.mjs';
-import { handleProviderStatus } from './paper.mjs';
 import { createCalendar } from './providers.mjs';
 import { createLedger } from './ledger.mjs';
 import { createContinuity } from './continuity.mjs';
@@ -47,21 +46,18 @@ const runtime = createRuntime({
 
 await runtime.startup();
 assert.equal(runtime.getState().state, 'WAITING');
+runtime.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: Date.parse(session.open) - 1 });
 wall = Date.parse(session.open);
 runtime.tick();
 assert.equal(runtime.getState().state, 'FLAT');
 assert.equal(runtime.onRawTrade({ symbol: 'SPY', price: 660 }).accepted, false);
 assert.equal(runtime.getState().blockers.length, 0);
-runtime.onMarketDataReconnect();
-assert.equal(runtime.getState().warmupUntil, wall + 30_000);
-
-// The first two minutes remain entry-ineligible, and the 15:30 cutoff remains closed.
-wall += 31_000;
-runtime.onTrade({ timestamp: new Date(wall).toISOString(), price: 659 });
-wall = Date.parse('2026-09-21T15:29:59-04:00');
-runtime.onTrade({ timestamp: new Date(wall).toISOString(), price: 659 });
-wall = Date.parse('2026-09-21T15:30:00-04:00');
-runtime.onTrade({ timestamp: new Date(wall).toISOString(), price: 661 });
+runtime.onTrade({ timestamp: '2026-09-21T13:31:00Z', price: 659 }, Date.parse('2026-09-21T13:31:00Z'));
+runtime.onMarketDataStatus({ status: 'disconnected', timestamp: Date.parse('2026-09-21T13:35:00Z') });
+runtime.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: Date.parse('2026-09-21T13:40:00Z') });
+runtime.onTrade({ timestamp: '2026-09-21T13:44:59Z', price: 660 }, Date.parse('2026-09-21T13:44:59Z'));
+const missedOpeningRange = runtime.onTrade({ timestamp: '2026-09-21T13:45:00Z', price: 661 }, Date.parse('2026-09-21T13:45:00Z'));
+assert.equal(missedOpeningRange.accepted, false, 'a mid-range feed gap invalidates opening-range coverage for the day');
 assert.equal(runtime.getState().state, 'FLAT');
 
 wall = Date.parse(nextSession.open);
@@ -70,13 +66,6 @@ assert.equal(runtime.getState().sessionDate, nextSession.date);
 assert.ok(ledgers.some(({ event, date }) => event === 'DAY_FINALIZE' && date === session.date));
 assert.ok(ledgers.some(({ event, date }) => event === 'DAY_START' && date === nextSession.date));
 assert.ok(ledgerOutput.some((line) => line.includes('Finalized trading day 2026-09-21')));
-
-wall += 121_000;
-for (let i = 0; i < 31; i += 1) runtime.onTrade({ timestamp: new Date(wall + i).toISOString(), price: 659 });
-runtime.onTrade({ timestamp: new Date(wall + 32).toISOString(), price: 660 });
-await new Promise((resolve) => setImmediate(resolve));
-assert.notEqual(runtime.getState().entry.pausedReason, 'AMBIGUOUS_ATM');
-assert.equal(runtime.getState().blockers.length, 0);
 
 const gateOrders = [];
 const gateRuntime = createRuntime({
@@ -91,59 +80,21 @@ const gateRuntime = createRuntime({
   getQuote: async (symbol) => ({ symbol, bid: 1, ask: 1.01, timestamp: new Date(wall).toISOString() }),
   continuity: continuity(),
 });
-wall = Date.parse(nextSession.open);
+wall = Date.parse(nextSession.open) - 1_000;
 await gateRuntime.startup();
-wall += 119_999;
+gateRuntime.onMarketDataStatus({ status: 'subscription_confirmed', timestamp: wall });
+wall = Date.parse(nextSession.open);
+gateRuntime.tick();
+wall = Date.parse(nextSession.open) + 60_000;
 gateRuntime.onTrade({ timestamp: new Date(wall).toISOString(), price: 659 });
-gateRuntime.onTrade({ timestamp: new Date(wall + 1).toISOString(), price: 661 });
-assert.equal(gateOrders.length, 0);
-wall += 1;
-gateRuntime.onTrade({ timestamp: new Date(wall).toISOString(), price: 659 });
-wall += 1;
+wall = Date.parse(nextSession.open) + 14 * 60_000;
+gateRuntime.onTrade({ timestamp: new Date(wall).toISOString(), price: 661 });
+assert.equal(gateOrders.length, 0, 'opening-range observations do not submit an entry');
+wall = Date.parse(nextSession.open) + 15 * 60_000;
 gateRuntime.onTrade({ timestamp: new Date(wall).toISOString(), price: 662 });
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(gateOrders.length, 1);
 gateRuntime.stop();
-
-const reconnectOrders = [];
-const reconnectRuntime = createRuntime({
-  broker: {
-    inspectCurrentState: async () => ({ positions: [], orders: [] }),
-    submitOrder: async (order) => { reconnectOrders.push(order); return { id: 'reconnect-buy', status: 'new' }; },
-    replaceOrder: async () => ({ id: 'reconnect-replace', status: 'new' }),
-    cancelOrder: async () => {},
-  },
-  calendar, now: () => wall, nowMono: () => mono,
-  getContracts: async () => [option('SPY260923C00660000', 660)],
-  getQuote: async (symbol) => ({ symbol, bid: 1, ask: 1.01, timestamp: new Date(wall).toISOString() }),
-  continuity: continuity(),
-});
-await reconnectRuntime.startup();
-const sipStream = 'wss://stream.data.alpaca.markets/v2/sip';
-const status = (stream, state) => handleProviderStatus(reconnectRuntime, { stream, status: state });
-const initialWarmup = reconnectRuntime.getState().warmupUntil;
-for (const stream of ['wss://stream.data.alpaca.markets/v1beta1/opra', 'wss://paper-api.alpaca.markets/stream']) {
-  status(stream, 'disconnected'); status(stream, 'reconnected', 1);
-}
-assert.equal(reconnectRuntime.getState().warmupUntil, initialWarmup, 'OPRA and trade-update reconnects do not reset entry warmup');
-status(sipStream, 'disconnected');
-assert.equal(reconnectRuntime.getState().warmupUntil, wall + 30_000);
-wall += 1_000;
-status(sipStream, 'authenticated'); status(sipStream, 'subscription_confirmed');
-assert.equal(reconnectRuntime.getState().warmupUntil, wall + 29_000, 'auth and subscription ACKs do not reset warmup');
-status(sipStream, 'reconnected');
-assert.equal(reconnectRuntime.getState().warmupUntil, wall + 30_000, 'SIP recovery starts a fresh warmup');
-wall += 29_999;
-reconnectRuntime.onTrade({ timestamp: new Date(wall).toISOString(), price: 659 });
-reconnectRuntime.onTrade({ timestamp: new Date(wall + 1).toISOString(), price: 662 });
-assert.equal(reconnectOrders.length, 0);
-wall += 2;
-reconnectRuntime.onTrade({ timestamp: new Date(wall).toISOString(), price: 659 });
-wall += 1;
-reconnectRuntime.onTrade({ timestamp: new Date(wall).toISOString(), price: 663 });
-await new Promise((resolve) => setImmediate(resolve));
-assert.equal(reconnectOrders.length, 1);
-reconnectRuntime.stop();
 
 const throwingLedger = createRuntime({
   broker: makeBroker(), calendar, now: () => wall, nowMono: () => mono,

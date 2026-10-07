@@ -55,10 +55,9 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
     emit();
   };
 
-  const priceTicks = (x) => Math.round(Number(x) * 100 + 1e-8);
-  const validQuote = (q, maxSpread) => (
+  const validQuote = (q) => (
     q && Number.isFinite(q.bid) && Number.isFinite(q.ask) &&
-    q.bid >= 0 && q.ask >= q.bid && priceTicks(q.ask) - priceTicks(q.bid) <= priceTicks(maxSpread)
+    q.bid > 0 && q.ask >= q.bid && q.ask - q.bid <= 0.05 + 1e-9
   );
 
   const clearPendingMutation = (pending) => {
@@ -162,15 +161,15 @@ export function createEntry({ broker, getContracts, getQuote, onFill, onState, n
         ? (row.strike > chosen.strike ? row : chosen)
         : (row.strike < chosen.strike ? row : chosen));
     const atmQuote = await getQuote(atm.symbol);
-    const atmEligible = validQuote(atmQuote, 0.02);
-    if (atmEligible) return { row: atm, quote: atmQuote, spreadCap: 0.02 };
+    const atmEligible = validQuote(atmQuote);
+    if (atmEligible) return { row: atm, quote: atmQuote, spreadCap: 0.05 };
 
     const otm = rows
       .filter((x) => x.symbol !== atm.symbol && (event.direction === 'CALL' ? x.strike > atm.strike : x.strike < atm.strike));
     otm.sort((a, b) => event.direction === 'CALL' ? a.strike - b.strike : b.strike - a.strike);
     if (!otm.length) return { reason: 'NO_OTM_FALLBACK' };
     const q = await getQuote(otm[0].symbol);
-    const otmEligible = validQuote(q, 0.05);
+    const otmEligible = validQuote(q);
     return otmEligible
       ? { row: otm[0], quote: q, spreadCap: 0.05 }
       : { reason: 'NO_ELIGIBLE_QUOTE' };

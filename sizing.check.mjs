@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { createContinuity } from './continuity.mjs';
 import { createEntry } from './entry.mjs';
 import { createRuntime } from './runtime.mjs';
+import { seedOpeningRange, triggerBreakout } from './check-support.mjs';
 
 const symbol = 'SPY260923C00660000';
 const date = '2026-09-23';
@@ -94,12 +95,12 @@ const contracts = [
 
 function runtimeHarness({ continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-')), 'state.json') }),
   broker, day = date, strategyCapital = 460.45, dailyLossGuard = true, entryQuantity = 1, ledger = () => {},
-  clock = { wall: Date.parse(`${day}T14:00:00Z`), mono: 0 } } = {}) {
+  clock = { wall: Date.parse(`${day}T13:29:59Z`), mono: 0 } } = {}) {
   return createRuntime({ broker, continuity, strategyCapital, entryQuantity, dailyLossGuard, ledger,
     now: () => clock.wall, nowMono: () => clock.mono,
     calendar: { sessionFor: () => session(day) },
     getContracts: async () => [{ symbol, strike: 660 }],
-    getQuote: async () => ({ symbol, bid: 1, ask: 1.01, timestamp: `${day}T14:00:00Z` }),
+    getQuote: async () => ({ symbol, bid: 4, ask: 4.01, timestamp: `${day}T13:45:00Z` }),
   });
 }
 
@@ -115,47 +116,39 @@ function brokerState({ equity = 10_000, positions = [], orders = [] } = {}) {
   };
 }
 
-async function breakout(runtime, prefix) {
-  runtime.onTrade({ timestamp: `${date}T14:00:00.000Z`, price: 100, tradeId: `${prefix}-range` });
-  runtime.onTrade({ timestamp: `${date}T14:00:01.000Z`, price: 101, tradeId: `${prefix}-break` });
-  await flush(); await flush();
-}
-
 // The PAPER runtime's one-contract quantity reaches a completed BUY/SELL set;
 // the realized contract loss is recorded once and stays below the $46.05 guard.
 {
   const continuity = createContinuity({ path: join(mkdtempSync(join(tmpdir(), 'v5-sizing-cycle-')), 'state.json') });
   const broker = brokerState();
-  const clock = { wall: Date.parse(`${date}T14:00:00Z`), mono: 0 };
+  const clock = { wall: Date.parse(`${date}T13:29:59Z`), mono: 0 };
   const runtime = runtimeHarness({ continuity, broker, clock });
   try {
     await runtime.startup();
-    clock.wall += 31_000; clock.mono += 31_000;
-    runtime.onTrade({ timestamp: new Date(clock.wall).toISOString(), price: 100, tradeId: 'cycle-range' });
-    clock.wall += 1_000; clock.mono += 1_000;
-    runtime.onTrade({ timestamp: new Date(clock.wall).toISOString(), price: 101, tradeId: 'cycle-break' });
+    clock.wall = Date.parse(`${date}T13:30:00Z`);
+    seedOpeningRange(runtime, date);
+    clock.wall = Date.parse(`${date}T13:45:00Z`);
+    triggerBreakout(runtime, date, 102, 'cycle-break');
     await flush(); await flush();
     const buy = [...broker.orders.values()].find((order) => order.side === 'buy');
     assert.ok(buy, 'one-contract breakout submits a BUY');
     assert.equal(buy.qty, 1);
     clock.wall += 100; clock.mono += 100;
     runtime.onOrderUpdate({ event: 'fill', side: 'buy', orderId: buy.id, clientOrderId: buy.clientOrderId,
-      executionId: 'cycle-buy-fill', fillQty: 1, fillPrice: 1.01, timestamp: new Date(clock.wall).toISOString() });
-    clock.wall += 10_001; clock.mono += 10_001;
-    runtime.onQuote({ symbol, bid: 1, ask: 1.01, timestamp: new Date(clock.wall).toISOString() });
+      executionId: 'cycle-buy-fill', fillQty: 1, fillPrice: 4.01, timestamp: new Date(clock.wall).toISOString() });
     clock.wall += 100; clock.mono += 100;
-    runtime.onQuote({ symbol, bid: 0.89, ask: 0.90, timestamp: new Date(clock.wall).toISOString() });
+    runtime.onQuote({ symbol, bid: 2.84, ask: 2.85, timestamp: new Date(clock.wall).toISOString() });
     await flush(); await flush();
     const sell = [...broker.orders.values()].find((order) => order.side === 'sell');
     assert.ok(sell, 'filled ownership receives its protective SELL');
     assert.equal(sell.qty, 1);
     clock.wall += 100; clock.mono += 100;
     runtime.onOrderUpdate({ event: 'fill', side: 'sell', orderId: sell.id, clientOrderId: sell.clientOrderId,
-      executionId: 'cycle-sell-fill', fillQty: 1, fillPrice: 0.80, timestamp: new Date(clock.wall).toISOString() });
-    assert.equal(runtime.getState().dailyLoss.cumulativeRealizedGross, -21);
-    assert.equal(runtime.getState().dailyLoss.tripped, false);
+      executionId: 'cycle-sell-fill', fillQty: 1, fillPrice: 2.84, timestamp: new Date(clock.wall).toISOString() });
+    assert.equal(runtime.getState().dailyLoss.cumulativeRealizedGross, -117);
+    assert.equal(runtime.getState().dailyLoss.tripped, true);
     assert.deepEqual(runtime.getState().dailyLoss.completedBuyIds, [buy.clientOrderId]);
-    assert.ok(runtime.getState().lossPauseUntil > clock.wall, 'completed losing set retains its ordinary loss pause');
+    assert.equal(runtime.getState().filledEntryDate, date, 'one filled entry is recorded for the session date');
   } finally { runtime.stop(); }
 }
 

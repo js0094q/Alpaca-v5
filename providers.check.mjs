@@ -9,11 +9,12 @@ const fetchImpl = async (url, options) => {
   requestOptions.push(options);
   const body = url.includes('/calendar')
     ? [{ date: '2026-09-21', open: '09:30', close: '16:00' }]
-    : url.includes('/contracts')
+    : url.includes('/contracts') && url.includes('expiration_date=2026-09-24')
       ? (url.includes('page_token=next')
         ? { option_contracts: [{ symbol: 'SPY260921C00601000', strike_price: '601' }], next_page_token: null }
         : { option_contracts: [{ symbol: 'SPY260921C00600000', strike_price: '600', size: '100' }], next_page_token: 'next' })
-      : { quotes: { SPY260921C00600000: { bp: 1.2, ap: 1.25, t: '2026-09-21T13:31:00Z' } } };
+      : url.includes('/contracts') ? { option_contracts: [], next_page_token: null }
+        : { quotes: { SPY260921C00600000: { bp: 1.2, ap: 1.25, t: '2026-09-21T13:31:00Z' } } };
   return { ok: true, status: 200, text: async () => JSON.stringify(body) };
 };
 
@@ -39,9 +40,25 @@ const timeoutValues = [];
 AbortSignal.timeout = (ms) => { timeoutValues.push(ms); return nativeAbortTimeout.call(AbortSignal, ms); };
 const contracts = await providers.getContracts('CALL', '2026-09-21T13:31:00Z');
 assert.deepEqual(contracts, [{ symbol: 'SPY260921C00600000', strike: 600, contractSize: 100 }, { symbol: 'SPY260921C00601000', strike: 601 }]);
+assert.ok(requests.filter((url) => url.includes('/contracts')).every((url) => url.includes('expiration_date=2026-09-24')), 'DTE 3 is preferred and no other expiry is queried after eligible contracts are found');
 const contractRequestCount = requests.length;
 assert.deepEqual(await providers.getContracts('CALL', '2026-09-21T13:31:00Z'), contracts, 'successful same-day contract result is cached');
 assert.equal(requests.length, contractRequestCount, 'cache avoids another paginated chain read');
+const beforeDteFallback = requests.length;
+assert.deepEqual(await providers.getContracts('CALL', '2026-09-22T13:31:00Z'), contracts, 'DTE 2 is used when DTE 3 has no contracts');
+assert.deepEqual([...new Set(requests.slice(beforeDteFallback).filter((url) => url.includes('/contracts')).map((url) => new URL(url).searchParams.get('expiration_date')))], ['2026-09-25', '2026-09-24']);
+const expiryQueries = [];
+let fourthDayAvailable = false;
+const emptyProviders = createAlpacaProviders({ key: 'key', secret: 'secret', baseUrl: 'https://paper-api.alpaca.markets', fetchImpl: async (url) => {
+  const expiry = new URL(url).searchParams.get('expiration_date');
+  expiryQueries.push(expiry);
+  return { ok: true, status: 200, text: async () => JSON.stringify({ option_contracts: fourthDayAvailable && expiry === '2026-10-02' ? [{ symbol: 'SPY261002P00600000', strike_price: '600', size: '100' }] : [] }) };
+}, WebSocketImpl: MockSocket });
+assert.deepEqual(await emptyProviders.getContracts('CALL', '2026-09-21T13:31:00Z'), [], 'no contracts in the permitted expiry window returns no eligible contracts');
+assert.deepEqual(expiryQueries.splice(0), ['2026-09-24', '2026-09-23', '2026-09-25'], 'queries are bounded to 3, 2, 4 calendar DTE');
+fourthDayAvailable = true;
+assert.equal((await emptyProviders.getContracts('PUT', '2026-09-28T13:31:00Z'))[0].symbol, 'SPY261002P00600000');
+assert.deepEqual(expiryQueries, ['2026-10-01', '2026-09-30', '2026-10-02'], 'fourth-day fallback crosses a month boundary');
 assert.ok(requests.every((url) => !url.includes('/v1/options/contracts')));
 assert.ok(requests.some((url) => url.includes('/v2/options/contracts')));
 assert.deepEqual(await providers.getQuote(contracts[0].symbol), { symbol: contracts[0].symbol, bid: 1.2, ask: 1.25, timestamp: '2026-09-21T13:31:00Z' });

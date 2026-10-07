@@ -27,7 +27,7 @@ const ambiguousMutationError = (error) => {
   return !Number.isInteger(status) || status >= 500 || [404, 408, 409, 429].includes(status) || /duplicate|already.*(?:exist|use)|must be unique/i.test(error?.message ?? '');
 };
 
-export function createPositions({ broker, onExit = () => {}, onExecutionIssue = () => {}, onState = () => {}, onTelemetry = () => {}, now = () => Date.now(), nowMono = () => Date.now() }) {
+export function createPositions({ broker, onExit = () => {}, onExecutionIssue = () => {}, onState = () => {}, onTelemetry = () => {}, now = () => Date.now(), nowMono = () => Date.now(), getDayStartCapital = () => null }) {
   const telemetry = (type, fields) => { try { onTelemetry({ type, at: new Date(Number(now())).toISOString(), ...fields }); } catch {} };
   const decision = (kind, trade, quote, bid) => telemetry('decision', { kind, tradeId: trade.tradeId, symbol: trade.symbol, bid: bid / 100, ask: finite(quote?.ask), quoteTimestamp: quote?.timestamp ?? null, entryPrice: trade.entryPrice, anchorBid: trade.anchorBid, profitFloor: trade.profitFloor });
   const trades = new Map();
@@ -39,6 +39,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
   const cancelRequested = new Set();
   const executionIssues = new Map();
   const mutationRecovery = new Map();
+  const externalSells = new Set();
   const trackOrder = (trade, id) => {
     if (!id) return;
     trade.orderIds.add(id);
@@ -200,11 +201,6 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
   };
   const notify = (trade) => onState(snapshot(trade));
 
-  const referenceCents = (trade) => {
-    const entry = cents(trade.entryPrice);
-    const anchor = cents(trade.anchorBid);
-    return entry === null || anchor === null ? null : Math.max(entry, anchor);
-  };
   const latch = (trade, quote = trade.quote, acceptedAt = trade.quoteReceivedAtMs) => {
     if (!trade.sellDecisionCaptured) {
       trade.sellDecisionBid = finite(quote?.bid);
@@ -219,53 +215,27 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
   };
 
   function evaluate(trade, quote, acceptedAt) {
-    if (trade.remainingQty <= 0 || trade.sellLatched) return;
+    if (trade.remainingQty <= 0) return;
     const bid = cents(quote.bid);
     const entry = cents(trade.entryPrice);
     if (bid === null || bid <= 0 || entry === null) return;
 
-    const evaluatedAt = Number.isFinite(acceptedAt) ? acceptedAt : null;
-    const graceEndsAt = Number.isFinite(trade.fillTimestampMs) ? trade.fillTimestampMs + 10_000 : null;
-    let anchorQuote = false;
-    if (trade.anchorBid === null) {
-      if (graceEndsAt === null || evaluatedAt === null || evaluatedAt < graceEndsAt) {
-        return;
-      }
-      trade.anchorBid = bid / 100;
-      trade.anchorSetAtMs = evaluatedAt;
-      trade.anchorSourceTimestamp = quote.timestamp ?? null;
-      anchorQuote = true;
-      notify(trade);
-      decision('anchor_set', trade, quote, bid);
-    }
-
-    const reference = referenceCents(trade);
-    if (bid * 10 <= reference * 9) {
+    trade.mfeCents = Math.max(trade.mfeCents ?? 0, bid - entry);
+    trade.maeCents = Math.max(trade.maeCents ?? 0, entry - bid);
+    if (trade.sellLatched || trade.reconciling) { notify(trade); return; }
+    const capital = finite(getDayStartCapital());
+    if (capital !== null && capital > 0 && entry - bid >= capital * 0.25) {
       decision('stop_latch', trade, quote, bid);
-      latch(trade, quote, evaluatedAt);
+      trade.exitReason = 'HARD_STOP';
+      notify(trade);
+      latch(trade, quote, Number.isFinite(acceptedAt) ? acceptedAt : null);
       return;
     }
-    if (anchorQuote) return;
-    const floor = cents(trade.profitFloor);
-    if (floor === null && bid >= reference + 2) {
-      trade.profitFloor = (bid - 4) / 100;
-      notify(trade);
-      decision('floor_set', trade, quote, bid);
-      return;
-    }
-    if (floor !== null && bid - 4 > floor) {
-      trade.profitFloor = (bid - 4) / 100;
-      notify(trade);
-      decision('floor_raise', trade, quote, bid);
-    }
-    if (floor !== null && bid < cents(trade.profitFloor)) {
-      decision('floor_latch', trade, quote, bid);
-      latch(trade, quote, evaluatedAt);
-    }
+    notify(trade);
   }
 
   function pump(trade) {
-    if (!trade.sellLatched || trade.remainingQty <= 0 || trade.inFlight || terminalOrders.has(trade.orderId)) return;
+    if (!trade.sellLatched || trade.remainingQty <= 0 || trade.inFlight || terminalOrders.has(trade.orderId) || externalSells.has(trade.symbol) || trade.reconciling) return;
     if (mutationRecovery.has(trade.tradeId)) return;
     if ([...executionIssues.values()].some((entry) => entry.tradeId === trade.tradeId && entry.reason === 'SELL_REPLACE_UNKNOWN')) return;
     const bid = finite(trade.quote?.bid);
@@ -320,6 +290,53 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     });
   }
 
+  function accountSellFill(trade, update, actionSource = 'V5_AUTO') {
+    if (update.executionId && trade.seenSellExecutions.has(update.executionId)) return false;
+    const filledQty = Number(update.fillQty);
+    const quantity = Math.max(0, Math.min(trade.remainingQty, filledQty || 0));
+    const price = finite(update.fillPrice);
+    if (!Number.isFinite(filledQty) || filledQty <= 0 || price === null) return false;
+    if (update.executionId) trade.seenSellExecutions.add(update.executionId);
+    const observed = observedFills.get(update.orderId) ?? { qty: 0, value: 0 };
+    observedFills.set(update.orderId, { qty: observed.qty + filledQty, value: observed.value + filledQty * price, timestamp: update.timestamp });
+    if (filledQty > trade.remainingQty) issue(trade, 'SELL_OVERFILL', { orderId: update.orderId, executionId: update.executionId, excessQty: filledQty - trade.remainingQty, fillQty: filledQty, fillPrice: price, timestamp: update.timestamp });
+    if (quantity <= 0) return false;
+    trade.remainingQty -= quantity;
+    const premiumPnlPerShare = trade.entryPrice === null ? null : (cents(price) - cents(trade.entryPrice)) * quantity / 100;
+    const realizedPnlUsd = premiumPnlPerShare === null || !Number.isFinite(trade.contractSize) || trade.contractSize <= 0 ? null : Math.round(premiumPnlPerShare * trade.contractSize * 100) / 100;
+    cancelClosedOrders(trade);
+    notify(trade);
+    onExit({
+      executionId: update.executionId, tradeId: trade.tradeId, tradeSetId: trade.tradeSetId, entrySetId: trade.tradeSetId,
+      signalId: trade.signalId, actionSource, exitReason: actionSource === 'EXTERNAL_MANUAL_EXIT' ? actionSource : trade.exitReason,
+      symbol: trade.symbol, qty: quantity, price, sellOrderId: update.orderId ?? null,
+      logicalSellId: trade.logicalSellId ?? null, sellDecisionBid: finite(trade.sellDecisionBid),
+      sellDecisionTimestamp: trade.sellDecisionTimestamp ?? null, sellDecisionSetAtMs: finite(trade.sellDecisionSetAtMs),
+      sellFillVsDecisionBid: finite(trade.sellDecisionBid) === null ? null : price - finite(trade.sellDecisionBid),
+      entryPrice: trade.entryPrice, premiumPnlPerShare, contractSize: trade.contractSize, contractSizeSource: trade.contractSizeSource,
+      realizedPnlUsd, mfeCents: trade.mfeCents ?? 0, maeCents: trade.maeCents ?? 0,
+      timestamp: update.timestamp ?? nowMono()
+    });
+    if (trade.remainingQty <= 0) { trade.remainingQty = 0; trade.orderId = null; trade.reconciling = false; notify(trade); }
+    else { trade.lastSubmittedPrice = null; trade.lastSubmittedQty = null; pump(trade); }
+    return true;
+  }
+
+  function adoptExternalFill(fill) {
+    const trade = trades.get(fill?.tradeId);
+    if (!trade || trade.entryPrice === null || trade.symbol !== fill.symbol || !fill.executionId || !Number.isFinite(epochMs(fill.timestamp)) ||
+        epochMs(fill.timestamp) < trade.fillTimestampMs || finite(fill.fillPrice) === null || Number(fill.fillPrice) < 0 ||
+        !(trade.remainingQty > 0) || Number(fill.fillQty) !== trade.remainingQty) {
+      if (trade) trade.reconciling = true;
+      if (trade) notify(trade);
+      return { adopted: false, reason: 'RECONCILING', trade: trade ? snapshot(trade) : null };
+    }
+    const unresolved = trade.inFlight || mutationRecovery.has(trade.tradeId) || [...trade.orderIds].some((id) => !terminalOrders.has(id));
+    if (unresolved) { trade.reconciling = true; notify(trade); return { adopted: false, reason: 'RECONCILING', trade: snapshot(trade) }; }
+    const adopted = accountSellFill(trade, { ...fill, orderId: fill.orderId ?? `external:${fill.executionId}` }, 'EXTERNAL_MANUAL_EXIT');
+    return adopted ? { adopted: true, trade: snapshot(trade) } : { adopted: false, reason: 'RECONCILING', trade: snapshot(trade) };
+  }
+
   function onFill(fill) {
     const fillTimestampMs = epochMs(fill?.timestamp);
     if (!fill?.tradeId || !fill.executionId || !fill.symbol || cents(fill.entryPrice) === null || !Number.isFinite(fillTimestampMs)) {
@@ -352,6 +369,10 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       sellDecisionCaptured: false,
       remainingQty: 1,
       profitFloor: null,
+      mfeCents: 0,
+      maeCents: 0,
+      exitReason: null,
+      reconciling: false,
       sellLatched: false,
       logicalSellId: null,
       orderId: null,
@@ -391,17 +412,13 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     }
   }
 
+  const tradeForOrderUpdate = (update) => orders.get(update?.orderId) ?? orders.get(update?.replaces) ?? orders.get(update?.replacedBy) ??
+    (update?.clientOrderId ? [...trades.values()].find((trade) => trade.logicalSellId === update.clientOrderId) : undefined);
+
   function onOrderUpdate(update) {
-    let trade = orders.get(update?.orderId) ?? orders.get(update?.replaces) ?? orders.get(update?.replacedBy);
-    if (!trade && update?.clientOrderId) {
-      trade = [...trades.values()].find((candidate) => candidate.logicalSellId === update.clientOrderId);
-      if (trade && update.orderId) {
-        if (!trade.orderId) trade.orderId = update.orderId;
-        trade.orderIds.add(update.orderId);
-        orders.set(update.orderId, trade);
-      }
-    }
+    const trade = tradeForOrderUpdate(update);
     if (!trade) return;
+    if (!trade.orderId && update.orderId && update.clientOrderId === trade.logicalSellId) trade.orderId = update.orderId;
     const pending = mutationRecovery.get(trade.tradeId);
     trackOrder(trade, update.orderId);
     trackOrder(trade, update.replacedBy);
@@ -433,54 +450,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     }
     cancelClosedOrders(trade);
     notify(trade);
-    if (update.executionId && trade.seenSellExecutions.has(update.executionId)) return;
-
-    const filledQty = Number(update.fillQty);
-    const quantity = Math.max(0, Math.min(trade.remainingQty, filledQty || 0));
-    const price = finite(update.fillPrice);
-    if (!Number.isFinite(filledQty) || filledQty <= 0 || price === null) return;
-    if (update.executionId) trade.seenSellExecutions.add(update.executionId);
-    const observed = observedFills.get(update.orderId) ?? { qty: 0, value: 0 };
-    observedFills.set(update.orderId, { qty: observed.qty + filledQty, value: observed.value + filledQty * price, timestamp: update.timestamp });
-    if (filledQty > trade.remainingQty) issue(trade, 'SELL_OVERFILL', { orderId: update.orderId, executionId: update.executionId, excessQty: filledQty - trade.remainingQty, fillQty: filledQty, fillPrice: price, timestamp: update.timestamp });
-    if (quantity <= 0) return;
-    trade.remainingQty -= quantity;
-    const premiumPnlPerShare = trade.entryPrice === null ? null : (cents(price) - cents(trade.entryPrice)) * quantity / 100;
-    const realizedPnlUsd = premiumPnlPerShare === null || !Number.isFinite(trade.contractSize) || trade.contractSize <= 0 ? null : Math.round(premiumPnlPerShare * trade.contractSize * 100) / 100;
-    cancelClosedOrders(trade);
-    notify(trade);
-    onExit({
-      executionId: update.executionId,
-      tradeId: trade.tradeId,
-      tradeSetId: trade.tradeSetId,
-      entrySetId: trade.tradeSetId,
-      signalId: trade.signalId,
-      actionSource: 'V5_AUTO',
-      symbol: trade.symbol,
-      qty: quantity,
-      price,
-      sellOrderId: update.orderId ?? null,
-      logicalSellId: trade.logicalSellId ?? null,
-      sellDecisionBid: finite(trade.sellDecisionBid),
-      sellDecisionTimestamp: trade.sellDecisionTimestamp ?? null,
-      sellDecisionSetAtMs: finite(trade.sellDecisionSetAtMs),
-      sellFillVsDecisionBid: finite(trade.sellDecisionBid) === null ? null : price - finite(trade.sellDecisionBid),
-      entryPrice: trade.entryPrice,
-      premiumPnlPerShare,
-      contractSize: trade.contractSize,
-      contractSizeSource: trade.contractSizeSource,
-      realizedPnlUsd,
-      timestamp: update.timestamp ?? nowMono()
-    });
-    if (trade.remainingQty <= 0) {
-      trade.remainingQty = 0;
-      trade.orderId = null;
-      notify(trade);
-    } else {
-      trade.lastSubmittedPrice = null;
-      trade.lastSubmittedQty = null;
-      pump(trade);
-    }
+    accountSellFill(trade, update);
   }
 
   function restoreTrade(state) {
@@ -489,6 +459,9 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
     const trade = {
       ...state,
       fillTimestampMs: Number.isFinite(fillTimestampMs) ? fillTimestampMs : undefined,
+      mfeCents: Number.isFinite(state.mfeCents) ? state.mfeCents : 0,
+      maeCents: Number.isFinite(state.maeCents) ? state.maeCents : 0,
+      reconciling: state.reconciling === true,
       anchorBid: state.anchorBid ?? null,
       sellDecisionBid: state.sellDecisionBid ?? null,
       sellDecisionTimestamp: state.sellDecisionTimestamp ?? null,
@@ -496,7 +469,7 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
       sellDecisionCaptured: state.sellDecisionBid !== null && state.sellDecisionBid !== undefined,
       anchorSetAtMs: state.anchorSetAtMs ?? null,
       anchorSourceTimestamp: state.anchorSourceTimestamp ?? null,
-      profitFloor: state.anchorBid == null ? null : state.profitFloor ?? null,
+      profitFloor: state.profitFloor ?? null,
       orderIds: new Set(state.orderId ? [state.orderId] : []),
       seenSellExecutions: new Set(),
       quote: null,
@@ -537,15 +510,19 @@ export function createPositions({ broker, onExit = () => {}, onExecutionIssue = 
 
   function liquidate() {
     for (const trade of trades.values()) {
-      if (trade.remainingQty > 0 && !trade.sellLatched) latch(trade);
+      if (trade.remainingQty > 0 && !trade.sellLatched && !trade.reconciling && !externalSells.has(trade.symbol)) latch(trade);
     }
   }
 
   return {
     onFill,
+    adoptExternalFill,
+    setExternalSell: (symbol, active) => { if (active) externalSells.add(symbol); else externalSells.delete(symbol); },
+    markReconciling: (tradeId) => { const trade = trades.get(tradeId); if (!trade) return false; trade.reconciling = true; notify(trade); return true; },
     liquidate,
     onQuote,
     onOrderUpdate,
+    isKnownOrderUpdate: (update) => Boolean(tradeForOrderUpdate(update)),
     reconcilePending: () => { for (const trade of trades.values()) { const pending = mutationRecovery.get(trade.tradeId); if (pending) void reconcileMutation(trade, pending); else for (const id of trade.orderIds) if (cancelRequested.has(id) && !terminalOrders.has(id)) { watchCancel(trade, id); break; } } },
     hasPendingMutation: (tradeId) => mutationRecovery.has(tradeId),
     hasPendingExecution: () => executionIssues.size > 0 || [...trades.values()].some((trade) => trade.remainingQty <= 0 && (trade.inFlight || [...trade.orderIds].some((id) => !terminalOrders.has(id)))),

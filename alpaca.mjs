@@ -14,6 +14,25 @@ export function createAlpacaBroker({ key, secret, baseUrl, fetchImpl = fetch, mu
     cancelOrder: (id) => request(`/v2/orders/${encodeURIComponent(id)}`, { method: 'DELETE', signal: mutationSignal() }).then(() => undefined),
     getOrder: (id) => request(`/v2/orders/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(5000) }),
     getOrderFills: (id) => request(`/v2/account/activities/FILL?order_id=${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(5000) }),
+    getFillActivities: async ({ after } = {}) => {
+      const rows = [];
+      let pageToken;
+      const seen = new Set();
+      do {
+        const query = new URLSearchParams({ direction: 'asc', page_size: '100' });
+        if (after) query.set('after', after);
+        if (pageToken) query.set('page_token', pageToken);
+        const page = await request(`/v2/account/activities/FILL?${query}`, { signal: AbortSignal.timeout(5000) });
+        if (!Array.isArray(page)) throw new Error('Incomplete account activity page');
+        rows.push(...page);
+        const next = page.at(-1)?.id;
+        if (page.length < 100) break;
+        if (!next || seen.has(next)) throw new Error('Invalid account activity pagination');
+        seen.add(next);
+        pageToken = next;
+      } while (pageToken);
+      return rows;
+    },
     getOrderByClientOrderId: (clientOrderId) => request(`/v2/orders:by_client_order_id?client_order_id=${encodeURIComponent(clientOrderId)}`, { signal: AbortSignal.timeout(5000) }),
     inspectCurrentState: async () => {
       const [account, positions, orders] = await Promise.all([

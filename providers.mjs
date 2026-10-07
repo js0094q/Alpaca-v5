@@ -23,6 +23,12 @@ const dateInET = (value) => new Intl.DateTimeFormat('en-CA', {
   timeZone: ET, year: 'numeric', month: '2-digit', day: '2-digit'
 }).format(new Date(value));
 
+const addCalendarDays = (date, days) => {
+  const [year, month, day] = date.split('-').map(Number);
+  const next = new Date(Date.UTC(year, month - 1, day + days));
+  return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}-${String(next.getUTCDate()).padStart(2, '0')}`;
+};
+
 const offsetAt = (utcMs) => {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: ET, timeZoneName: 'longOffset' }).formatToParts(new Date(utcMs));
   const offset = parts.find(({ type }) => type === 'timeZoneName')?.value ?? 'GMT';
@@ -134,18 +140,24 @@ export function createAlpacaProviders({ key, secret, fetchImpl = fetch, WebSocke
     const cacheKey = `${date}:${direction}`;
     const cached = contractCache.get(cacheKey);
     if (cached && Date.now() - cached.at < CONTRACT_CACHE_MS) return (await cached.result).map((row) => ({ ...row }));
-    const result = fetchContracts(direction, date);
+    const result = (async () => {
+      for (const dte of [3, 2, 4]) {
+        const contracts = await fetchContracts(direction, addCalendarDays(date, dte));
+        if (contracts.length) return contracts;
+      }
+      return [];
+    })();
     const entry = { at: Date.now(), result };
     contractCache.set(cacheKey, entry);
     try { return (await result).map((row) => ({ ...row })); }
     catch (error) { if (contractCache.get(cacheKey) === entry) contractCache.delete(cacheKey); throw error; }
   };
-  const fetchContracts = async (direction, date) => {
+  const fetchContracts = async (direction, expirationDate) => {
     const type = direction === 'CALL' ? 'call' : 'put';
     const result = [];
     let pageToken;
     do {
-      const query = new URLSearchParams({ underlying_symbols: 'SPY', expiration_date: date, type, status: 'active', limit: '10000' });
+      const query = new URLSearchParams({ underlying_symbols: 'SPY', expiration_date: expirationDate, type, status: 'active', limit: '10000' });
       if (pageToken) query.set('page_token', pageToken);
       const page = await request(`${baseUrl}/v2/options/contracts?${query}`);
       for (const item of page?.option_contracts ?? page?.contracts ?? []) {

@@ -16,17 +16,20 @@ const dateInET = (value) => new Intl.DateTimeFormat('en-CA', {
   timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit'
 }).format(new Date(value));
 
-const dispatch = (runtime, name, value) => {
-  if (name === 'sip') runtime.onRawTrade(value);
+const dispatch = (runtime, name, value, receivedAt) => {
+  if (name === 'sip') runtime.onRawTrade(value, receivedAt);
   else if (name === 'opra') runtime.onQuote(value);
+  else if (name === 'status') handleProviderStatus(runtime, value, receivedAt);
   else runtime.onOrderUpdate(value);
 };
 
-export const handleProviderStatus = (runtime, value) => {
-  if (runtime && value.stream?.endsWith('/v2/sip') && ['disconnected', 'reconnected'].includes(value.status)) runtime.onMarketDataReconnect();
+export const handleProviderStatus = (runtime, value, receivedAt = Date.now()) => {
+  if (runtime && value.stream?.endsWith('/v2/sip') && ['subscription_confirmed', 'disconnected', 'reconnecting', 'reconnected'].includes(value.status)) {
+    runtime.onMarketDataStatus({ status: value.status, timestamp: receivedAt });
+  }
 };
 
-export async function runPaper({ mode, credentials: suppliedCredentials, durationMs = DEFAULT_DURATION_MS, untilClose = false, entryCutoffMinuteET = 15 * 60 + 30, stopAtMs = null, flattenAtMs = null, signal, dependencies = {} } = {}) {
+export async function runPaper({ mode, credentials: suppliedCredentials, durationMs = DEFAULT_DURATION_MS, untilClose = false, entryCutoffMinuteET = 11 * 60 + 30, stopAtMs = null, flattenAtMs = null, signal, dependencies = {} } = {}) {
   if (!['paper', 'live'].includes(mode)) throw new TypeError('mode must be paper or live');
   if (!Number.isFinite(durationMs) || durationMs <= 0) throw new TypeError('durationMs must be positive');
   if (!Number.isInteger(entryCutoffMinuteET) || entryCutoffMinuteET < 0 || entryCutoffMinuteET >= 24 * 60) throw new RangeError('entryCutoffMinuteET must be an integer minute of day');
@@ -46,10 +49,11 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
   let acceptingSip = true;
   let connection;
   const onMessage = (name, value) => {
+    const receivedAt = Date.now();
     if (name === 'sip' && !acceptingSip) return;
     if (ready) {
-      dispatch(runtime, name, value);
-    } else pending.push([name, value]);
+      dispatch(runtime, name, value, receivedAt);
+    } else pending.push([name, value, receivedAt]);
   };
 
   const draining = async () => {
@@ -83,7 +87,7 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
       onRawTrade: (value) => onMessage('sip', value),
       onQuote: (value) => onMessage('opra', value),
       onTradeUpdate: (value) => onMessage('tradeUpdates', value),
-      onStatus: (value) => handleProviderStatus(ready ? runtime : null, value),
+      onStatus: (value) => onMessage('status', value),
     });
 
     connection.subscribeOptions((snapshot.positions ?? []).map((position) => position.symbol).filter((symbol) => /^SPY\d{6}[CP]\d{8}$/.test(String(symbol))));
@@ -119,8 +123,8 @@ export async function runPaper({ mode, credentials: suppliedCredentials, duratio
     runtime = (dependencies.createRuntime ?? createRuntime)({ broker, entryCutoffMinuteET, stopAtMs, getContracts: providers.getContracts, getQuote, calendar: providers.calendar, ledger: ledger.record, telemetry, continuity: createContinuity({ path: paths.continuity }), dailyLossGuard: true, strategyCapital: 460.45, entryQuantity: 1, liquidateAt: untilClose ? close - 60_000 : liquidateAt });
     await runtime.start();
     ready = true;
-    for (const [name, value] of pending.splice(0)) {
-      dispatch(runtime, name, value);
+    for (const [name, value, receivedAt] of pending.splice(0)) {
+      dispatch(runtime, name, value, receivedAt);
     }
     let finish;
     const stopped = new Promise((resolve) => { finish = resolve; });

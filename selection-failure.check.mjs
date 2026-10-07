@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createContinuity } from './continuity.mjs';
 import { createRuntime } from './runtime.mjs';
+import { seedOpeningRange } from './check-support.mjs';
 
 const sessionOpen = Date.parse('2026-09-23T13:30:00Z');
 const calendar = { sessionFor: () => ({ date: '2026-09-23', status: 'open', open: new Date(sessionOpen).toISOString(), close: '2026-09-23T20:00:00Z' }) };
@@ -33,7 +34,7 @@ async function checkFailure(kind) {
     },
     getQuote: async (symbol) => {
       if (kind === 'atm-quote' && attempts === 1) throw new Error('ATM quote unavailable');
-      if (kind === 'fallback-quote' && attempts === 1 && symbol === 'ATM') return { bid: 1, ask: 1.04 };
+      if (kind === 'fallback-quote' && attempts === 1 && symbol === 'ATM') return { bid: 1, ask: 1.06 };
       if (kind === 'fallback-quote' && attempts === 1 && symbol === 'OTM') throw new Error('fallback quote unavailable');
       return { bid: 1, ask: 1.02, timestamp: new Date(wall).toISOString() };
     },
@@ -41,13 +42,9 @@ async function checkFailure(kind) {
 
   try {
     await runtime.startup();
-    // The signal detector requires a two-minute opening delay and a prior range.
-    for (let i = 0; i < 30; i += 1) {
-      wall = sessionOpen + 120_000 + i * 100;
-      runtime.onTrade({ timestamp: new Date(wall).toISOString(), price: 659 });
-    }
+    seedOpeningRange(runtime, '2026-09-23', { low: 658, high: 659 });
     const breakout = async (price) => {
-      wall += 1_000;
+      wall = Math.max(wall + 1_000, sessionOpen + 15 * 60_000);
       runtime.onTrade({ timestamp: new Date(wall).toISOString(), price });
       await flush();
     };
